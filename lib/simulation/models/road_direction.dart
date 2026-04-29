@@ -1,0 +1,1 @@
+enum RoadDirection { forward, backward }
