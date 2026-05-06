@@ -1,19 +1,8 @@
-enum CommunityVoteTargetType {
-  jeepSighting,
-  routeAccuracy,
-}
+enum CommunityVoteTargetType { jeepSighting, routeAccuracy }
 
-enum CommunityVoteRole {
-  passenger,
-  pedestrian,
-}
+enum CommunityVoteRole { passenger, pedestrian }
 
-enum CommunityVoteChoice {
-  confirm,
-  reject,
-  accurate,
-  inaccurate,
-}
+enum CommunityVoteChoice { confirm, reject, accurate, inaccurate }
 
 class CommunityVote {
   CommunityVote({

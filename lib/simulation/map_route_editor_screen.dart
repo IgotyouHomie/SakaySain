@@ -2,10 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 class MapRouteEditorScreen extends StatefulWidget {
-  const MapRouteEditorScreen({
-    super.key,
-    required this.initialPoints,
-  });
+  const MapRouteEditorScreen({super.key, required this.initialPoints});
 
   final List<LatLng> initialPoints;
 
@@ -134,10 +131,7 @@ class _MapRouteEditorScreenState extends State<MapRouteEditorScreen> {
             onPressed: _fitRoute,
             icon: const Icon(Icons.center_focus_strong),
           ),
-          TextButton(
-            onPressed: _saveRoute,
-            child: const Text('SAVE'),
-          ),
+          TextButton(onPressed: _saveRoute, child: const Text('SAVE')),
         ],
       ),
       body: Stack(
@@ -153,7 +147,9 @@ class _MapRouteEditorScreenState extends State<MapRouteEditorScreen> {
             onMapCreated: (controller) {
               _controller = controller;
               if (_points.isNotEmpty) {
-                WidgetsBinding.instance.addPostFrameCallback((_) => _fitRoute());
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => _fitRoute(),
+                );
               }
             },
             onTap: _addPoint,

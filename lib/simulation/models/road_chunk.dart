@@ -15,6 +15,8 @@ class ChunkPassEvent {
 class RoadChunk {
   RoadChunk({
     required this.id,
+    required this.roadLabel,
+    required this.indexInRoad,
     required this.startPoint,
     required this.endPoint,
     required this.lengthMeters,
@@ -23,11 +25,15 @@ class RoadChunk {
   });
 
   final int id;
+  final String roadLabel;
+  final int indexInRoad;
   final Offset startPoint;
   final Offset endPoint;
   final double lengthMeters;
   final String forwardDirectionLabel;
   final String reverseDirectionLabel;
+
+  String get label => 'Chunk $roadLabel-$indexInRoad';
 
   final List<ChunkPassEvent> jeepPassEvents = <ChunkPassEvent>[];
   final List<ChunkPassEvent> speculativePassEvents = <ChunkPassEvent>[];

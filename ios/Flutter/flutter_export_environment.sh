@@ -1,7 +1,7 @@
 #!/bin/sh
 # This is a generated file; do not edit or check into version control.
 export "FLUTTER_ROOT=C:\Flutter\src\flutter"
-export "FLUTTER_APPLICATION_PATH=D:\Backups\IMPORTANTS\COMPROGS\AndroidStudio\Sakay-Sain-BACKUP"
+export "FLUTTER_APPLICATION_PATH=D:\Backups\IMPORTANTS\COMPROGS\AndroidStudio\SAKAY-SAIN LATEST 5-6-2026\SakaySain-main"
 export "COCOAPODS_PARALLEL_CODE_SIGN=true"
 export "FLUTTER_TARGET=lib\main.dart"
 export "FLUTTER_BUILD_DIR=build"
