@@ -58,7 +58,7 @@ class SimulationPainter extends CustomPainter {
   final int? highlightedJeepId;
   final Set<int> pausedUserIds;
   final List<
-      ({int sourceUserId, String jeepType, Offset position, double confidence})
+    ({int sourceUserId, String jeepType, Offset position, double confidence})
   >
   ghostMarkers;
   final List<({Offset position, String label, double flowRate})>
@@ -114,11 +114,7 @@ class SimulationPainter extends CustomPainter {
 
       for (final road in roads) {
         for (int i = 0; i < road.length - 1; i++) {
-          canvas.drawLine(
-            toCanvas(road[i]),
-            toCanvas(road[i + 1]),
-            snapPaint,
-          );
+          canvas.drawLine(toCanvas(road[i]), toCanvas(road[i + 1]), snapPaint);
         }
       }
     }
@@ -134,8 +130,8 @@ class SimulationPainter extends CustomPainter {
             toCanvas(draftRoad[i]),
             toCanvas(draftRoad[i + 1]),
             draftRoadPaint,
-            dashLength: (16 * strokeCompensation).clamp(10.0, 20.0),
-            gapLength: (10 * strokeCompensation).clamp(6.0, 14.0),
+            dashLength: (20 * strokeCompensation).clamp(12.0, 26.0),
+            gapLength: (12 * strokeCompensation).clamp(7.0, 16.0),
           );
         }
 
@@ -166,26 +162,22 @@ class SimulationPainter extends CustomPainter {
 
       final chunkPaint = showFlowHeatOverlay
           ? (Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth =
-            (3.2 + (1.8 * normalizedFlow)) * strokeCompensation
-        ..strokeCap = StrokeCap.round
-        ..color = heatColor)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth =
+                  (3.2 + (1.8 * normalizedFlow)) * strokeCompensation
+              ..strokeCap = StrokeCap.round
+              ..color = heatColor)
           : (Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.0 * strokeCompensation
-        ..strokeCap = StrokeCap.round
-        ..color = Colors.blue);
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 3.0 * strokeCompensation
+              ..strokeCap = StrokeCap.round
+              ..color = Colors.blue);
 
       // Larger inset gives more space between adjacent chunks.
       final segmentStart = Offset.lerp(start, end, 0.26)!;
       final segmentEnd = Offset.lerp(start, end, 0.75)!;
 
-      canvas.drawLine(
-        toCanvas(segmentStart),
-        toCanvas(segmentEnd),
-        chunkPaint,
-      );
+      canvas.drawLine(toCanvas(segmentStart), toCanvas(segmentEnd), chunkPaint);
 
       if (showRoadChunkDirections) {
         final centerPoint = Offset.lerp(segmentStart, segmentEnd, 0.5)!;
@@ -216,7 +208,7 @@ class SimulationPainter extends CustomPainter {
     }
 
     final phoneUser = users.firstWhere(
-          (user) => user.id == phoneUserId,
+      (user) => user.id == phoneUserId,
       orElse: () => users.first,
     );
 
@@ -272,7 +264,7 @@ class SimulationPainter extends CustomPainter {
     }).toList();
 
     final clusterDistanceInPainterSpace =
-    (clusterDistanceThresholdPx / viewportScale).clamp(8, 120).toDouble();
+        (clusterDistanceThresholdPx / viewportScale).clamp(8, 120).toDouble();
 
     final clusteredUserIds = <int>{};
     for (final cluster in clusters) {
@@ -297,8 +289,10 @@ class SimulationPainter extends CustomPainter {
           final point = user.trailPositions[i];
           final progress = (i + 1) / totalPoints;
           final alpha = (0.04 + (0.86 * progress * progress)).clamp(0.0, 1.0);
-          final radius =
-          (baseRadius * (0.55 + (0.70 * progress))).clamp(0.9, 6.0);
+          final radius = (baseRadius * (0.55 + (0.70 * progress))).clamp(
+            0.9,
+            6.0,
+          );
           final trailPaint = Paint()
             ..style = PaintingStyle.fill
             ..color = trailColor.withValues(alpha: alpha);
@@ -320,18 +314,16 @@ class SimulationPainter extends CustomPainter {
 
       final userCenter = toCanvas(user.position);
 
-      final visibilityPaint = Paint()
-        ..style = PaintingStyle.fill
-        ..color = user.isPhoneUser
-            ? Colors.lightBlue.withValues(alpha: 0.20)
-            : user.isMoving
-            ? Colors.lightGreen.withValues(alpha: 0.25)
-            : Colors.grey.withValues(alpha: 0.2);
-      canvas.drawCircle(
-        userCenter,
-        user.visibilityRadius * scale,
-        visibilityPaint,
-      );
+      if (user.isPhoneUser) {
+        final visibilityPaint = Paint()
+          ..style = PaintingStyle.fill
+          ..color = Colors.lightBlue.withValues(alpha: 0.16);
+        canvas.drawCircle(
+          userCenter,
+          user.visibilityRadius * scale * 0.78,
+          visibilityPaint,
+        );
+      }
 
       final markerPaint = Paint()
         ..style = PaintingStyle.fill
@@ -343,13 +335,61 @@ class SimulationPainter extends CustomPainter {
             ? Colors.green
             : Colors.grey;
 
-      final markerSize = user.isPhoneUser ? userSize + 2 : userSize;
+      final markerSize = user.isPhoneUser ? userSize + 4 : userSize + 8;
       final markerRect = Rect.fromCenter(
         center: userCenter,
         width: markerSize,
         height: markerSize,
       );
+      final markerBorderPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2 * strokeCompensation
+        ..color = user.isPhoneUser
+            ? Colors.lightBlueAccent
+            : pausedUserIds.contains(user.id)
+            ? Colors.orangeAccent
+            : user.isMoving
+            ? Colors.greenAccent
+            : Colors.grey.shade300;
+
       canvas.drawRect(markerRect, markerPaint);
+      canvas.drawRect(
+        markerRect.inflate(0.5 * strokeCompensation),
+        markerBorderPaint,
+      );
+
+      if (!user.isPhoneUser) {
+        final roofPaint = Paint()
+          ..style = PaintingStyle.fill
+          ..color = Colors.white.withValues(alpha: user.isMoving ? 0.18 : 0.10);
+        final roofRect = Rect.fromCenter(
+          center: Offset(userCenter.dx, userCenter.dy - (markerSize * 0.16)),
+          width: markerSize * 0.55,
+          height: markerSize * 0.28,
+        );
+        canvas.drawRect(roofRect, roofPaint);
+
+        final wheelPaint = Paint()
+          ..style = PaintingStyle.fill
+          ..color = Colors.black.withValues(alpha: 0.55);
+        final wheelRadius = (1.25 * strokeCompensation).clamp(0.9, 2.1);
+        canvas.drawCircle(
+          Offset(
+            userCenter.dx - (markerSize * 0.26),
+            userCenter.dy + (markerSize * 0.28),
+          ),
+          wheelRadius,
+          wheelPaint,
+        );
+        canvas.drawCircle(
+          Offset(
+            userCenter.dx + (markerSize * 0.26),
+            userCenter.dy + (markerSize * 0.28),
+          ),
+          wheelRadius,
+          wheelPaint,
+        );
+      }
 
       if (user.id == selectedUserId && !user.isPhoneUser) {
         final selectedPaint = Paint()
@@ -544,13 +584,13 @@ class SimulationPainter extends CustomPainter {
   }
 
   void _drawDashedLine(
-      Canvas canvas,
-      Offset start,
-      Offset end,
-      Paint paint, {
-        required double dashLength,
-        required double gapLength,
-      }) {
+    Canvas canvas,
+    Offset start,
+    Offset end,
+    Paint paint, {
+    required double dashLength,
+    required double gapLength,
+  }) {
     final totalLength = (end - start).distance;
     if (totalLength <= 0.001) return;
 
@@ -559,8 +599,8 @@ class SimulationPainter extends CustomPainter {
 
     while (distance < totalLength) {
       final dashStart = start + (direction * distance);
-      final dashEnd = start +
-          (direction * math.min(distance + dashLength, totalLength));
+      final dashEnd =
+          start + (direction * math.min(distance + dashLength, totalLength));
       canvas.drawLine(dashStart, dashEnd, paint);
       distance += dashLength + gapLength;
     }

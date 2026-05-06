@@ -100,9 +100,7 @@ class RoutePersistenceService {
     final encoded = jsonEncode({
       "id": profile.id,
       "name": profile.name,
-      "world": profile.worldPoints
-          .map((e) => {"x": e.dx, "y": e.dy})
-          .toList(),
+      "world": profile.worldPoints.map((e) => {"x": e.dx, "y": e.dy}).toList(),
       "map": profile.mapPoints
           .map((e) => {"lat": e.latitude, "lng": e.longitude})
           .toList(),

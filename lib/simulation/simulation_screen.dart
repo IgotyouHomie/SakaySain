@@ -13,6 +13,7 @@ import 'models/local_activity_entry.dart';
 import 'models/moving_state.dart';
 import 'models/nearest_road_point.dart';
 import 'models/projection_result.dart';
+import 'models/jeep_type.dart';
 import 'models/road_chunk.dart';
 import 'models/road_chunk_event.dart';
 import 'models/road_direction.dart';
@@ -26,29 +27,20 @@ import 'painters/simulation_painter.dart';
 import 'widgets/map_legend.dart';
 import 'map_route_editor_screen.dart';
 import 'route_persistence_service.dart';
+import '../screens/road_persistence_service.dart';
 
 part 'simulation_screen_chunk_eta_part.dart';
 part 'simulation_screen_interaction_part.dart';
 part 'simulation_screen_geometry_part.dart';
 part 'simulation_screen_verification_part.dart';
 
+enum CommunityVoteTargetType { jeepSighting, routeAccuracy }
 
-enum CommunityVoteTargetType {
-  jeepSighting,
-  routeAccuracy,
-}
+enum CommunityVoteRole { passenger, pedestrian }
 
-enum CommunityVoteRole {
-  passenger,
-  pedestrian,
-}
+enum CommunityVoteChoice { confirm, reject, accurate, inaccurate }
 
-enum CommunityVoteChoice {
-  confirm,
-  reject,
-  accurate,
-  inaccurate,
-}
+enum _LoadingPreset { light, normal, congested }
 
 class CommunityVote {
   CommunityVote({
@@ -171,6 +163,9 @@ class _SimulationScreenState extends State<SimulationScreen>
   static const double _maxVisibilityRadius = 320;
   static const double _minVisibilityRadius = 45;
   static const double _defaultJeepSpeed = 45;
+  static const Duration _minStopCooldown = Duration(seconds: 12);
+  static const Duration _maxStopCooldown = Duration(seconds: 36);
+  static const Duration _minPassengerSessionDuration = Duration(seconds: 15);
   static const Duration _falseJeepDetectionWindow = Duration(seconds: 30);
   static const double _autoPassengerSpeedThreshold = 20;
   static const Duration _manualRepositionCooldown = Duration(seconds: 5);
@@ -196,7 +191,7 @@ class _SimulationScreenState extends State<SimulationScreen>
   int _frame = 0;
   double _zoom = 1;
   int _controlUserId = _phoneUserId;
-  bool _isDeveloperMode = false;
+  bool _isDeveloperMode = true;
   bool _isPlacingMockUser = false;
 
   bool _isRoadEditorMode = false;
@@ -206,18 +201,31 @@ class _SimulationScreenState extends State<SimulationScreen>
   bool _showTrails = true;
 
   bool _isPlacingTrafficZone = false;
-  bool _trafficEnabled = false;
+  bool _trafficEnabled = true; // ENABLED BY DEFAULT for realistic simulation
   bool _showFlowHeatOverlay = false;
-  int _maxTrafficLines = 4;
+  int _maxTrafficLines = 8; // Increased for more realistic traffic
   final List<TrafficZone> _trafficZones = [];
+  DateTime?
+  _lastTrafficGenerationTime; // Auto-generate traffic zones periodically
 
   bool _loadingEnabled = false;
   double _stopProbability = 0.1;
+  _LoadingPreset _loadingPreset = _LoadingPreset.normal;
+  int _minStopCooldownSeconds = 12;
+  int _maxStopCooldownSeconds = 36;
+  int _shortStopMinSeconds = 2;
+  int _shortStopMaxSeconds = 5;
+  int _longStopMinSeconds = 6;
+  int _longStopMaxSeconds = 11;
   bool _kalmanEnabled = true;
   double _kalmanGain = _defaultKalmanGain;
   bool _randomGhostToggleEnabled = false;
   double _randomGhostToggleLikelihood = 0.12;
+  List<JeepType> _availableJeepTypes = <JeepType>[];
+  List<SakayRoute> _availableRoutes = <SakayRoute>[];
+  final Map<String, SakayRoute> _availableRoutesById = <String, SakayRoute>{};
   final Map<int, DateTime> _pauseUntil = {};
+  final Map<int, DateTime> _nextStopEligibleAt = {};
   final math.Random _random = math.Random(42);
 
   bool _trackScanActive = false;
@@ -269,7 +277,6 @@ class _SimulationScreenState extends State<SimulationScreen>
   final Map<int, GhostJeep> _ghostJeepsBySourceUser = {};
   DateTime? _lastTrackPressedAt;
 
-
   final List<CommunityVote> _communityVotes = <CommunityVote>[];
   final Map<int, TrustProfile> _trustProfilesByUser = <int, TrustProfile>{};
   final Map<int, double> _routeAccuracyScoreByChunk = <int, double>{};
@@ -297,6 +304,7 @@ class _SimulationScreenState extends State<SimulationScreen>
 
     _routePath = List<Offset>.from(initialRoutePath);
     _roadNetwork = <List<Offset>>[_routePath];
+    _loadJeepCatalog();
 
     _users = [
       User(
@@ -345,8 +353,6 @@ class _SimulationScreenState extends State<SimulationScreen>
         jeepType: 'Jeep A',
         isMockUser: true,
       ),
-
-
     ];
 
     for (final user in _users) {
@@ -377,6 +383,41 @@ class _SimulationScreenState extends State<SimulationScreen>
     _simulationTicker = AnimationController.unbounded(vsync: this)
       ..addListener(_advanceSimulation)
       ..repeat(min: 0, max: 1, period: const Duration(milliseconds: 16));
+
+    Future<void> _loadJeepCatalog() async {
+      final jeepTypes = await RoadPersistenceService.loadJeepTypes();
+      final routes = await RoadPersistenceService.loadRoutes();
+
+      if (!mounted) return;
+
+      final routesById = <String, SakayRoute>{};
+      for (final route in routes) {
+        routesById[route.id] = route;
+      }
+
+      final routeProfilesByJeepType = <String, JeepRouteProfile>{};
+      for (final jeepType in jeepTypes) {
+        final route = routesById[jeepType.assignedRouteId];
+        if (route == null || route.points.length < 2) continue;
+        routeProfilesByJeepType[jeepType.name] = JeepRouteProfile(
+          id: route.id,
+          name: route.jeepName,
+          jeepType: jeepType.name,
+          worldPath: _convertLatLngRouteToWorldOffsets(route.points),
+        );
+      }
+
+      setState(() {
+        _availableJeepTypes = jeepTypes;
+        _availableRoutes = routes;
+        _availableRoutesById
+          ..clear()
+          ..addAll(routesById);
+        _routeProfilesByJeepType
+          ..clear()
+          ..addAll(routeProfilesByJeepType);
+      });
+    }
 
     _loadPersistedRoutes();
   }
@@ -648,32 +689,32 @@ class _SimulationScreenState extends State<SimulationScreen>
                   child: entries.isEmpty
                       ? const Text('No local activity data yet.')
                       : ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: entries.length,
-                    itemBuilder: (context, index) {
-                      final e = entries[index];
-                      final jeepTypesText = e.jeepTypes.isEmpty
-                          ? 'None'
-                          : e.jeepTypes.join(', ');
-                      final lastSeen = e.lastActivity == null
-                          ? 'N/A'
-                          : '${e.lastActivity!.hour.toString().padLeft(2, '0')}:${e.lastActivity!.minute.toString().padLeft(2, '0')}:${e.lastActivity!.second.toString().padLeft(2, '0')}';
+                          shrinkWrap: true,
+                          itemCount: entries.length,
+                          itemBuilder: (context, index) {
+                            final e = entries[index];
+                            final jeepTypesText = e.jeepTypes.isEmpty
+                                ? 'None'
+                                : e.jeepTypes.join(', ');
+                            final lastSeen = e.lastActivity == null
+                                ? 'N/A'
+                                : '${e.lastActivity!.hour.toString().padLeft(2, '0')}:${e.lastActivity!.minute.toString().padLeft(2, '0')}:${e.lastActivity!.second.toString().padLeft(2, '0')}';
 
-                      return Card(
-                        child: ListTile(
-                          title: Text('Chunk ${e.label}'),
-                          subtitle: Text(
-                            'Flow: ${e.flowRate.toStringAsFixed(2)} j/min\n'
-                                'Last Activity: $lastSeen\n'
-                                'Jeep Types: $jeepTypesText\n'
-                                'Observed: ${e.observedPassCount} | Speculative: ${e.speculativePassCount}\n'
-                                'Avg Arrival: ${e.avgArrivalInterval.toStringAsFixed(1)}s | Avg Travel: ${e.avgTravelTime.toStringAsFixed(1)}s\n'
-                                'Accuracy: ${e.accuracyPercent.toStringAsFixed(1)}%',
-                          ),
+                            return Card(
+                              child: ListTile(
+                                title: Text('Chunk ${e.label}'),
+                                subtitle: Text(
+                                  'Flow: ${e.flowRate.toStringAsFixed(2)} j/min\n'
+                                  'Last Activity: $lastSeen\n'
+                                  'Jeep Types: $jeepTypesText\n'
+                                  'Observed: ${e.observedPassCount} | Speculative: ${e.speculativePassCount}\n'
+                                  'Avg Arrival: ${e.avgArrivalInterval.toStringAsFixed(1)}s | Avg Travel: ${e.avgTravelTime.toStringAsFixed(1)}s\n'
+                                  'Accuracy: ${e.accuracyPercent.toStringAsFixed(1)}%',
+                                ),
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
-                  ),
                 ),
               ],
             ),
@@ -774,29 +815,29 @@ class _SimulationScreenState extends State<SimulationScreen>
     final effectiveVisibleToPhone = _buildTrackVisibleIds(baseVisibleToPhone);
     final clusterInfos = _buildVisibleMovingClusters(effectiveVisibleToPhone);
     final topFlowChunkBadgesList =
-    _routeChunks.where((chunk) => chunk.flowRateJeepsPerMinute > 0).toList()
-      ..sort(
+        _routeChunks.where((chunk) => chunk.flowRateJeepsPerMinute > 0).toList()
+          ..sort(
             (a, b) =>
-            b.flowRateJeepsPerMinute.compareTo(a.flowRateJeepsPerMinute),
-      );
+                b.flowRateJeepsPerMinute.compareTo(a.flowRateJeepsPerMinute),
+          );
     final top3FlowChunkBadges = topFlowChunkBadgesList.take(3).map((chunk) {
       final center = Offset(
         (chunk.startPoint.dx + chunk.endPoint.dx) / 2,
         (chunk.startPoint.dy + chunk.endPoint.dy) / 2,
       );
       return (
-      position: center,
-      label: chunk.forwardDirectionLabel.replaceAll(' -> ', '-'),
-      flowRate: chunk.flowRateJeepsPerMinute,
+        position: center,
+        label: chunk.forwardDirectionLabel.replaceAll(' -> ', '-'),
+        flowRate: chunk.flowRateJeepsPerMinute,
       );
     }).toList();
     final controlUser = _controlUser;
     final rollingSummary = _buildRollingAccuracySummary();
     final mediaHeight = MediaQuery.of(context).size.height;
     final topPanelMaxHeight =
-    (_isDeveloperMode ? mediaHeight * 0.38 : mediaHeight * 0.20)
-        .clamp(120.0, 300.0)
-        .toDouble();
+        (_isDeveloperMode ? mediaHeight * 0.38 : mediaHeight * 0.20)
+            .clamp(120.0, 300.0)
+            .toDouble();
 
     _trackedEta = _computeNearestIncomingEta(
       roadWaiterPin: _roadWaiterPin,
@@ -806,473 +847,372 @@ class _SimulationScreenState extends State<SimulationScreen>
           : effectiveVisibleToPhone,
     );
 
+    // ── SakaySain-styled Simulation Lab scaffold ──────────────────────────
+    // All engine logic above this line is untouched.
+    // Only the visual presentation changes here.
+
     return Scaffold(
-      appBar: AppBar(title: const Text('2D Mobility Simulation')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
+      backgroundColor: const Color(0xFF0E3530),
+      body: SafeArea(
+        bottom: false,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SizedBox(
-              height: topPanelMaxHeight,
-              child: NotificationListener<OverscrollIndicatorNotification>(
-                onNotification: (notification) {
-                  notification.disallowIndicator();
-                  return true;
-                },
+            // ── TOP BAR ──────────────────────────────────────────────────
+            Container(
+              color: const Color(0xFF1E7A76),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () => Navigator.pop(context),
+                    child: const Icon(
+                      Icons.arrow_back,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Simulation Lab',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 17,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                  // Quick stats
+                  _LabChip(
+                    label:
+                        'J:${_users.where((u) => !u.isPhoneUser && u.isMoving).length}',
+                    tooltip: 'Active jeeps',
+                  ),
+                  const SizedBox(width: 6),
+                  _LabChip(
+                    label: 'G:${_ghostJeepsBySourceUser.length}',
+                    tooltip: 'Ghost jeeps',
+                  ),
+                  const SizedBox(width: 6),
+                  _LabChip(
+                    label: 'C:${_routeChunks.length}',
+                    tooltip: 'Road chunks',
+                  ),
+                ],
+              ),
+            ),
+
+            // ── STATUS STRIP ──────────────────────────────────────────
+            if (_devShowEtaPredictionData || _isWaitingForJeep)
+              Container(
+                color: const Color(0xFF164E4A),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 7,
+                ),
                 child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
                     children: [
-                      Text(
-                        'Users: ${_users.length} | Visible to phone: ${effectiveVisibleToPhone.length} | Zoom: ${_zoom.toStringAsFixed(2)}x',
-                      ),
-                      Text(
-                        'Observed jeeps: ${_users.where((u) => !u.isPhoneUser && u.isMoving).length} | Ghost jeeps: ${_ghostJeepsBySourceUser.length}',
-                      ),
-                      Text('Route Source: $_routeDataSource | Map Points: ${_savedMapRoutePoints.length}'),
-                      if (_isLoadingSavedRoute)
-                        const Text('Loading saved route...'),
-                      const SizedBox(height: 6),
-                      if (_devShowEtaPredictionData)
-                        Text(
-                          _roadWaiterPin == null
-                              ? 'ETA: Place Road Waiter Pin using Track'
+                      if (_isWaitingForJeep) ...[
+                        _StatusPill(
+                          icon: Icons.timer,
+                          text:
+                              'Wait: ${_waitElapsedSeconds().toStringAsFixed(1)}s',
+                          color: Colors.orangeAccent,
+                        ),
+                        const SizedBox(width: 6),
+                        _StatusPill(
+                          icon: Icons.show_chart,
+                          text:
+                              'Pred: ${(_waitPredictedEtaSeconds ?? 0).toStringAsFixed(1)}s',
+                          color: Colors.greenAccent,
+                        ),
+                        const SizedBox(width: 6),
+                        _StatusPill(
+                          icon: Icons.speed,
+                          text:
+                              'Spd: ${_latestPhoneInferredSpeed.toStringAsFixed(1)}m/s',
+                          color: Colors.lightBlueAccent,
+                        ),
+                      ] else if (_trackedEta != null) ...[
+                        _StatusPill(
+                          icon: Icons.directions_bus,
+                          text:
+                              'ETA: ${_trackedEta!.etaSeconds.toStringAsFixed(1)}s',
+                          color: Colors.greenAccent,
+                        ),
+                        const SizedBox(width: 6),
+                        _StatusPill(
+                          icon: Icons.verified,
+                          text:
+                              '${_trackedEta!.confidenceLabel} ${_trackedEta!.confidencePercent.toStringAsFixed(0)}%',
+                          color: Colors.yellowAccent,
+                        ),
+                        const SizedBox(width: 6),
+                        _StatusPill(
+                          icon: Icons.social_distance,
+                          text:
+                              '${_trackedEta!.distanceMeters.toStringAsFixed(0)}m',
+                          color: Colors.lightBlueAccent,
+                        ),
+                      ] else ...[
+                        _StatusPill(
+                          icon: Icons.info_outline,
+                          text: _roadWaiterPin == null
+                              ? 'Press Track to place waiting pin'
                               : _selectedPinDirection == null
-                              ? 'ETA: Select pin direction (Forward/Backward)'
-                              : _trackedEta == null
-                              ? 'ETA: No approaching jeep found for selected types'
-                              : 'Nearest Jeep: ${_trackedEta!.jeepType} (#${_trackedEta!.userId}) | ETA: ${_trackedEta!.etaSeconds.toStringAsFixed(1)}s | Confidence: ${_trackedEta!.confidenceLabel} (${_trackedEta!.confidencePercent.toStringAsFixed(0)}%) | Distance: ${_trackedEta!.distanceMeters.toStringAsFixed(0)}m | TFactor: ${_trackedEta!.trafficFactor.toStringAsFixed(2)}',
+                              ? 'Choose jeep direction'
+                              : 'Scanning for jeeps...',
+                          color: Colors.white60,
                         ),
-                      if (_devShowEtaPredictionData && _trackedEta != null)
-                        Text(
-                          'Method: ${_trackedEta!.predictionMethod} | Source: ${_trackedEta!.predictionSource} | Window: ${_trackedEta!.predictionMinSeconds.toStringAsFixed(1)}s-${_trackedEta!.predictionMaxSeconds.toStringAsFixed(1)}s | Age: ${_trackedEta!.predictionAgeSeconds.toStringAsFixed(1)}s',
-                        ),
-                      if (_devShowEtaPredictionData && _trackedEta != null)
-                        Text(
-                          'ETA components: realtime ${_trackedEta!.etaRealTimeSeconds.toStringAsFixed(1)}s, historical ${_trackedEta!.etaHistoricalSeconds.toStringAsFixed(1)}s, traffic ${_trackedEta!.etaTrafficSeconds.toStringAsFixed(1)}s',
-                        ),
-                      if (_isWaitingForJeep)
-                        Text(
-                          'Wait timer: ${_waitElapsedSeconds().toStringAsFixed(1)}s | Initial prediction: ${(_waitPredictedEtaSeconds ?? 0).toStringAsFixed(1)}s | Phone speed: ${_latestPhoneInferredSpeed.toStringAsFixed(1)} m/s',
-                        ),
-                      if (_isWaitingForJeep)
-                        Text(
-                          'Prediction Source: $_waitPredictionSource | Confidence: $_waitConfidenceLabel | Distance: ${_waitPredictionDistanceMeters.toStringAsFixed(0)}m',
-                        ),
-                      if (_isWaitingForJeep)
-                        Text(
-                          'Prediction Window: ${_waitPredictionWindowMinSeconds.toStringAsFixed(1)}s - ${_waitPredictionWindowMaxSeconds.toStringAsFixed(1)}s | Stability: ${_waitPredictionStabilityPercent().toStringAsFixed(1)}%',
-                        ),
-                      if (_pendingFoundJeepVerification)
-                        Text(
-                          'Manual jeep confirmation pending: ${_falseJeepDetectionWindow.inSeconds}s verification window',
-                        ),
-                      if (_isWaitingForJeep)
-                        Text(
-                          'Passenger state: ${_isPassengerUser ? 'PENDING/ACTIVE' : 'IDLE'}',
-                        ),
-                      if (_etaTestRecords.isNotEmpty)
-                        Text(
-                          'Total Tests: ${rollingSummary.totalTests} | Average Accuracy: ${rollingSummary.averageAccuracyPercent.toStringAsFixed(1)}%',
-                        ),
-                      if (_etaTestRecords.isNotEmpty)
-                        Text(
-                          'Mean Abs Error: ${rollingSummary.meanAbsoluteErrorSeconds.toStringAsFixed(1)}s | Mean Rel Error: ${rollingSummary.meanRelativeErrorPercent.toStringAsFixed(1)}%',
-                        ),
-                      if (_etaTestRecords.isNotEmpty)
-                        Text(
-                          'Best Route Accuracy: ${rollingSummary.bestRouteLabel} (${rollingSummary.bestRouteAccuracyPercent.toStringAsFixed(1)}%) | Worst Route Accuracy: ${rollingSummary.worstRouteLabel} (${rollingSummary.worstRouteAccuracyPercent.toStringAsFixed(1)}%)',
-                        ),
-                      if (_latestEtaTestRecord != null)
-                        Text(
-                          'Latest test: chunk ${_chunkCode(_latestEtaTestRecord!.roadChunkId)} | error ${_formatSignedSeconds(_latestEtaTestRecord!.predictionErrorSeconds)} | accuracy ${_latestEtaTestRecord!.accuracyPercent.toStringAsFixed(1)}% | jeep ${_latestEtaTestRecord!.jeepType}',
-                        ),
-                      if (_latestEtaTestRecord != null)
-                        Text(
-                          'Latest source: ${_latestEtaTestRecord!.predictionSource} (${_latestEtaTestRecord!.confidenceLabel}) | Method: ${_latestEtaTestRecord!.predictionMethod} | Dist: ${_latestEtaTestRecord!.predictionDistanceMeters.toStringAsFixed(0)}m',
-                        ),
-                      if (_selectedPinDirection != null)
-                        Text(
-                          'Direction: ${_selectedPinDirection == RoadDirection.forward ? 'FORWARD (start → end)' : 'BACKWARD (end → start)'}',
-                        ),
-                      if (_roadWaiterPin != null && _trackedEta == null)
-                        Text(
-                          'Avg arrival interval: ${_averageArrivalIntervalSeconds(_roadWaiterPin!.chunkId).toStringAsFixed(1)}s',
-                        ),
-                      if (_trackScanActive)
-                        Text(
-                          'Track scan active (${_lastTrackPressedAt == null ? 0 : DateTime.now().difference(_lastTrackPressedAt!).inSeconds}s): hidden jeeps temporarily revealed',
-                        ),
-                      if (_communityVotes.isNotEmpty)
-                        Text(
-                          'Community Votes: ${_communityVotes.length} | Your Trust: ${_trustProfileFor(_phoneUserId).reliabilityPercent.toStringAsFixed(1)}%',
-                        ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          const Text('Developer Mode'),
-                          Switch(
-                            value: _isDeveloperMode,
-                            onChanged: _toggleDeveloperMode,
-                          ),
-                          ElevatedButton(
-                            onPressed: _onTrackPressed,
-                            child: Text(
-                              _isPlacingRoadWaiterPin
-                                  ? 'Tap road to place pin...'
-                                  : 'Track',
-                            ),
-                          ),
-                          ElevatedButton(
-                            onPressed: _isWaitingForJeep
-                                ? _onFoundJeepPressed
-                                : null,
-                            child: const Text('Found Jeep'),
-                          ),
-                          ElevatedButton(
-                            onPressed: _openJeepTypeSelectionPanel,
-                            child: const Text('Filter Jeeps'),
-                          ),
-                        ],
-                      ),
-                      if (!_isDeveloperMode)
-                        const Text(
-                          'Developer tools are hidden. Enable Developer Mode to test interactions.',
-                        ),
-                      const SizedBox(height: 8),
-                      if (_isDeveloperMode)
-                        Text(
-                          _isPlacingRoadWaiterPin
-                              ? 'Track Mode: Tap map to place Road Waiter Pin (snaps to road)'
-                              : _isRoadEditorMode
-                              ? 'Road Editor: tap map to add route points, then Save draft road.'
-                              : _isPlacingMockUser
-                              ? 'Dev Mode: Tap map to place mock user (near road = auto moving jeep)'
-                              : _isPlacingTrafficZone
-                              ? 'Dev Mode: Tap map near road to place traffic line'
-                              : 'Dev Mode: Tap map to move your phone user / select mock user',
-                        ),
-                      if (_isDeveloperMode) ...[
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            ElevatedButton(
-                              onPressed: _startRoadEditor,
-                              child: Text(
-                                _isRoadEditorMode
-                                    ? 'Editing road...'
-                                    : 'Road editor',
-                              ),
-                            ),
-                            ElevatedButton(
-                              onPressed: _draftRoutePoints.isNotEmpty
-                                  ? _clearDraftRoad
-                                  : null,
-                              child: const Text('Clear draft road'),
-                            ),
-                            ElevatedButton(
-                              onPressed: _draftRoutePoints.length >= 2
-                                  ? _saveDraftRoad
-                                  : null,
-                              child: const Text('Save draft road'),
-                            ),
-                            ElevatedButton(
-                              onPressed: _isRoadEditorMode
-                                  ? _cancelRoadEditor
-                                  : null,
-                              child: const Text('Cancel road edit'),
-                            ),
-                            ElevatedButton(
-                              onPressed: _openLocalActivityInsights,
-                              child: const Text('Local insights'),
-                            ),
-                            ElevatedButton(
-                              onPressed: _openMapRouteEditor,
-                              child: const Text('Map route editor'),
-                            ),
-                            ElevatedButton(
-                              onPressed: _openRouteProfiles,
-                              child: const Text("Load Route"),
-                            ),
-                            ElevatedButton(
-                              onPressed: _routeChunks.isEmpty
-                                  ? null
-                                  : () {
-                                final chunkId =
-                                    _selectedVerificationChunkId ?? 0;
-                                _openVerificationPanelForChunk(
-                                  chunkId.clamp(0, _routeChunks.length - 1),
-                                );
-                              },
-                              child: const Text('Community Verify'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Dev Mode Settings',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                        Row(
-                          children: [
-                            const Text('Auto-stop when jeep reaches pin'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _devAutoStopWhenJeepReachesPin,
-                              onChanged: (value) => setState(
-                                    () => _devAutoStopWhenJeepReachesPin = value,
-                              ),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            const Text('Include ghost jeeps'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _devAutoStopIncludeGhostJeeps,
-                              onChanged: (value) => setState(
-                                    () => _devAutoStopIncludeGhostJeeps = value,
-                              ),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            const Text('Show ETA prediction data'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _devShowEtaPredictionData,
-                              onChanged: (value) => setState(
-                                    () => _devShowEtaPredictionData = value,
-                              ),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            const Text('Show chunk stats'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _devShowChunkStats,
-                              onChanged: (value) =>
-                                  setState(() => _devShowChunkStats = value),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            const Text('Traffic Enabled'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _trafficEnabled,
-                              onChanged: (value) =>
-                                  setState(() => _trafficEnabled = value),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            const Text('Mock Loading Enabled'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _loadingEnabled,
-                              onChanged: (value) =>
-                                  setState(() => _loadingEnabled = value),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            const Text('Show Trails'),
-                            const SizedBox(width: 8),
-                            Switch(
-                              value: _showTrails,
-                              onChanged: (value) =>
-                                  setState(() => _showTrails = value),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            ElevatedButton(
-                              onPressed: _isPlacingMockUser
-                                  ? () => setState(() => _isPlacingMockUser = false)
-                                  : _startAddMockUser,
-                              child: Text(
-                                _isPlacingMockUser
-                                    ? 'Stop Placing Mock Users'
-                                    : 'Place Mock User',
-                              ),
-                            ),
-                            ElevatedButton(
-                              onPressed: _togglePlaceTrafficZone,
-                              child: Text(
-                                _isPlacingTrafficZone
-                                    ? 'Stop Placing Traffic'
-                                    : 'Place Traffic Zone',
-                              ),
-                            ),
-                            ElevatedButton(
-                              onPressed: _randomizeTrafficZones,
-                              child: const Text('Randomize Traffic'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Control User: #$_controlUserId (${controlUser.jeepType})',
-                        ),
-                        Slider(
-                          value: controlUser.speed.clamp(0.0, 100.0),
-                          min: 0,
-                          max: 100,
-                          divisions: (100 / _speedStep).round(),
-                          label: controlUser.speed.toStringAsFixed(0),
-                          onChanged: _setControlUserSpeed,
-                        ),
-                        const Text('Selected mock user visibility radius'),
-                        Slider(
-                          value: controlUser.visibilityRadius.clamp(
-                            _minVisibilityRadius,
-                            _maxVisibilityRadius,
-                          ),
-                          min: _minVisibilityRadius,
-                          max: _maxVisibilityRadius,
-                          divisions:
-                          ((_maxVisibilityRadius - _minVisibilityRadius) /
-                              _visibilityStep)
-                              .round(),
-                          label: controlUser.visibilityRadius.toStringAsFixed(
-                            0,
-                          ),
-                          onChanged: _setControlUserRadius,
+                      ],
+                      if (_etaTestRecords.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        _StatusPill(
+                          icon: Icons.analytics_outlined,
+                          text:
+                              'Tests: ${rollingSummary.totalTests} | Acc: ${rollingSummary.averageAccuracyPercent.toStringAsFixed(1)}%',
+                          color: Colors.purpleAccent,
                         ),
                       ],
                     ],
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
+
+            // ── CANVAS (the simulation) ───────────────────────────────
             Expanded(
-              child: ClipRect(
-                child: Stack(
-                  children: [
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTapUp: _handleMapTap,
-                      child: InteractiveViewer(
-                        transformationController: _transformationController,
-                        minScale: 0.5,
-                        maxScale: 4,
-                        constrained: false,
-                        boundaryMargin: const EdgeInsets.all(500),
-                        child: SizedBox(
-                          width: _canvasSize,
-                          height: _canvasSize,
-                          child: CustomPaint(
-                            painter: SimulationPainter(
-                              worldRadius: worldRadius,
-                              roads: [
-                                ..._roadNetwork,
-                                if (_draftRoutePoints.length >= 2)
-                                  _draftRoutePoints,
-                              ],
-                              roadChunks: _routeChunks
-                                  .map(
-                                    (chunk) => (
-                                start: chunk.startPoint,
-                                end: chunk.endPoint,
-                                flowRate: chunk.flowRateJeepsPerMinute,
-                                ),
-                              )
-                                  .toList(),
-                              maxChunkFlowRate: _routeChunks.isEmpty
-                                  ? 1
-                                  : _routeChunks
-                                  .map(
-                                    (chunk) =>
-                                chunk.flowRateJeepsPerMinute,
-                              )
-                                  .reduce(math.max),
-                              users: _users,
-                              trafficZones: _trafficZones
-                                  .map(
-                                    (zone) =>
-                                (start: zone.start, end: zone.end),
-                              )
-                                  .toList(),
-                              viewportScale: _zoom,
-                              frame: _frame,
-                              phoneUserId: _phoneUserId,
-                              selectedUserId: _controlUserId,
-                              visibleToPhoneIds: effectiveVisibleToPhone,
-                              phoneVisibilityRadius: phoneUser.visibilityRadius,
-                              showRoadSnapZone:
-                              _isDeveloperMode && _isPlacingMockUser,
-                              roadSnapThreshold: _roadSnapThreshold,
-                              showClusterDebugRadii: _isDeveloperMode,
-                              clusterDistanceThresholdPx:
-                              _clusterDistanceThresholdPx,
-                              clusters: clusterInfos,
-                              showTrails: _showTrails,
-                              roadWaiterPin: _roadWaiterPin?.point,
-                              roadWaiterDirectionIsForward:
-                              _selectedPinDirection == null
-                                  ? null
-                                  : _selectedPinDirection ==
-                                  RoadDirection.forward,
-                              highlightedJeepId: _trackedEta?.userId,
-                              pausedUserIds: _pauseUntil.entries
-                                  .where(
-                                    (entry) =>
-                                    entry.value.isAfter(DateTime.now()),
-                              )
-                                  .map((entry) => entry.key)
-                                  .toSet(),
-                              ghostMarkers: _ghostJeepsBySourceUser.values
-                                  .map(
-                                    (ghost) => (
-                                sourceUserId: ghost.sourceUserId,
-                                position: ghost.position,
-                                jeepType: ghost.jeepType,
-                                confidence: ghost.confidence,
-                                ),
-                              )
-                                  .toList(),
-                              topFlowChunkBadges: top3FlowChunkBadges,
-                              showFlowHeatOverlay: _showFlowHeatOverlay,
-                              showRoadChunkDirections:
-                              _isDeveloperMode && _devShowChunkStats,
-                            ),
+              child: Stack(
+                children: [
+                  // The actual simulation canvas
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapUp: _handleMapTap,
+                    child: InteractiveViewer(
+                      transformationController: _transformationController,
+                      minScale: 0.5,
+                      maxScale: 4,
+                      constrained: false,
+                      boundaryMargin: const EdgeInsets.all(500),
+                      child: SizedBox(
+                        width: _canvasSize,
+                        height: _canvasSize,
+                        child: CustomPaint(
+                          painter: SimulationPainter(
+                            worldRadius: worldRadius,
+                            roads: [
+                              ..._roadNetwork,
+                              if (_draftRoutePoints.length >= 2)
+                                _draftRoutePoints,
+                            ],
+                            roadChunks: _routeChunks
+                                .map(
+                                  (chunk) => (
+                                    start: chunk.startPoint,
+                                    end: chunk.endPoint,
+                                    flowRate: chunk.flowRateJeepsPerMinute,
+                                  ),
+                                )
+                                .toList(),
+                            maxChunkFlowRate: _routeChunks.isEmpty
+                                ? 1
+                                : _routeChunks
+                                      .map((c) => c.flowRateJeepsPerMinute)
+                                      .reduce(math.max),
+                            users: _users,
+                            trafficZones: _trafficZones
+                                .map(
+                                  (zone) => (start: zone.start, end: zone.end),
+                                )
+                                .toList(),
+                            viewportScale: _zoom,
+                            frame: _frame,
+                            phoneUserId: _phoneUserId,
+                            selectedUserId: _controlUserId,
+                            visibleToPhoneIds: effectiveVisibleToPhone,
+                            phoneVisibilityRadius: phoneUser.visibilityRadius,
+                            showRoadSnapZone:
+                                _isDeveloperMode && _isPlacingMockUser,
+                            roadSnapThreshold: _roadSnapThreshold,
+                            showClusterDebugRadii: _isDeveloperMode,
+                            clusterDistanceThresholdPx:
+                                _clusterDistanceThresholdPx,
+                            clusters: clusterInfos,
+                            showTrails: _showTrails,
+                            roadWaiterPin: _roadWaiterPin?.point,
+                            roadWaiterDirectionIsForward:
+                                _selectedPinDirection == null
+                                ? null
+                                : _selectedPinDirection ==
+                                      RoadDirection.forward,
+                            highlightedJeepId: _trackedEta?.userId,
+                            pausedUserIds: _pauseUntil.entries
+                                .where((e) => e.value.isAfter(DateTime.now()))
+                                .map((e) => e.key)
+                                .toSet(),
+                            ghostMarkers: _ghostJeepsBySourceUser.values
+                                .map(
+                                  (ghost) => (
+                                    sourceUserId: ghost.sourceUserId,
+                                    position: ghost.position,
+                                    jeepType: ghost.jeepType,
+                                    confidence: ghost.confidence,
+                                  ),
+                                )
+                                .toList(),
+                            topFlowChunkBadges: top3FlowChunkBadges,
+                            showFlowHeatOverlay: _showFlowHeatOverlay,
+                            showRoadChunkDirections:
+                                _isDeveloperMode && _devShowChunkStats,
                           ),
                         ),
                       ),
                     ),
+                  ),
+
+                  // Legend (bottom-right)
+                  const Positioned(right: 12, bottom: 80, child: _SimLegend()),
+
+                  // Mode badge (top-left overlay)
+                  if (_isRoadEditorMode ||
+                      _isPlacingMockUser ||
+                      _isPlacingTrafficZone ||
+                      _isPlacingRoadWaiterPin)
                     Positioned(
-                      right: 16,
-                      bottom: 16,
-                      child: MapLegend(selectedUserId: _controlUserId),
+                      top: 10,
+                      left: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xDD2E9E99),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          _isPlacingRoadWaiterPin
+                              ? '📍 Tap road to place waiting pin'
+                              : _isRoadEditorMode
+                              ? '✏️ Tap to add road points'
+                              : _isPlacingMockUser
+                              ? '👤 Tap to place mock jeep'
+                              : '🚦 Traffic zones refresh automatically',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
                     ),
-                  ],
-                ),
+
+                  // Snapzone toggle (top-right of canvas)
+                  Positioned(
+                    top: 10,
+                    right: 12,
+                    child: _CanvasToggleBtn(
+                      icon: _showFlowHeatOverlay
+                          ? Icons.layers
+                          : Icons.layers_outlined,
+                      label: 'Heat',
+                      active: _showFlowHeatOverlay,
+                      onTap: () => setState(
+                        () => _showFlowHeatOverlay = !_showFlowHeatOverlay,
+                      ),
+                    ),
+                  ),
+                ],
               ),
+            ),
+
+            // ── BOTTOM DEV PANEL ──────────────────────────────────────
+            _SimDevPanel(
+              // Primary actions
+              isWaiting: _isWaitingForJeep,
+              isPlacingPin: _isPlacingRoadWaiterPin,
+              onTrack: _onTrackPressed,
+              onFoundJeep: _isWaitingForJeep ? _onFoundJeepPressed : null,
+              onFilterJeeps: _openJeepTypeSelectionPanel,
+              // Dev tools
+              isDeveloperMode: _isDeveloperMode,
+              onToggleDeveloperMode: _toggleDeveloperMode,
+              isRoadEditorMode: _isRoadEditorMode,
+              hasDraftPoints: _draftRoutePoints.isNotEmpty,
+              canSaveDraft: _draftRoutePoints.length >= 2,
+              onStartRoadEditor: _startRoadEditor,
+              onClearDraft: _draftRoutePoints.isNotEmpty
+                  ? _clearDraftRoad
+                  : null,
+              onSaveDraft: _draftRoutePoints.length >= 2
+                  ? _saveDraftRoad
+                  : null,
+              onCancelRoadEditor: _isRoadEditorMode ? _cancelRoadEditor : null,
+              onLocalInsights: _openLocalActivityInsights,
+              onMapRouteEditor: _openMapRouteEditor,
+              onRouteProfiles: _openRouteProfiles,
+              isPlacingMockUser: _isPlacingMockUser,
+              onToggleMockUser: () =>
+                  setState(() => _isPlacingMockUser = !_isPlacingMockUser),
+              isPlacingTraffic: _trafficEnabled && _trafficZones.isNotEmpty,
+              onToggleTraffic: _randomizeTrafficZones,
+              onRandomizeTraffic: _randomizeTrafficZones,
+              // Toggles
+              trafficEnabled: _trafficEnabled,
+              onTrafficEnabled: (v) => setState(() => _trafficEnabled = v),
+              loadingEnabled: _loadingEnabled,
+              onLoadingEnabled: (v) => setState(() => _loadingEnabled = v),
+              loadingPreset: _loadingPreset,
+              onLoadingPresetChanged: _setLoadingPreset,
+              showTrails: _showTrails,
+              onShowTrails: (v) => setState(() => _showTrails = v),
+              devShowEta: _devShowEtaPredictionData,
+              onDevShowEta: (v) =>
+                  setState(() => _devShowEtaPredictionData = v),
+              devShowChunkStats: _devShowChunkStats,
+              onDevShowChunkStats: (v) =>
+                  setState(() => _devShowChunkStats = v),
+              autoStop: _devAutoStopWhenJeepReachesPin,
+              onAutoStop: (v) =>
+                  setState(() => _devAutoStopWhenJeepReachesPin = v),
+              includeGhosts: _devAutoStopIncludeGhostJeeps,
+              onIncludeGhosts: (v) =>
+                  setState(() => _devAutoStopIncludeGhostJeeps = v),
+              randomGhostToggleEnabled: _randomGhostToggleEnabled,
+              onRandomGhostToggle: (v) =>
+                  setState(() => _randomGhostToggleEnabled = v),
+              randomGhostLikelihood: _randomGhostToggleLikelihood,
+              onRandomGhostLikelihood: (v) =>
+                  setState(() => _randomGhostToggleLikelihood = v),
+              onConvertAllToGhost: _convertAllMockJeepsToGhost,
+              onRestoreAllFromGhost: _restoreAllGhostJeeps,
+              // Speed/radius sliders
+              controlUserLabel: '#$_controlUserId (${controlUser.jeepType})',
+              controlUserSpeed: controlUser.speed.clamp(0.0, 100.0),
+              onSpeedChanged: _setControlUserSpeed,
+              controlUserRadius: controlUser.visibilityRadius.clamp(
+                _minVisibilityRadius,
+                _maxVisibilityRadius,
+              ),
+              minRadius: _minVisibilityRadius,
+              maxRadius: _maxVisibilityRadius,
+              onRadiusChanged: _setControlUserRadius,
+              speedStep: _speedStep,
+              visibilityStep: _visibilityStep,
             ),
           ],
         ),
       ),
     );
   }
+  // ── end of overridden build ───────────────────────────────────────────────
+
+  // (all original state/logic methods below remain untouched)
+
+  @pragma('vm:prefer-inline')
+  String get _unusedDummyForBuildSeparator => '';
 
   void _onTransformChanged() {
     final nextZoom = _transformationController.value.getMaxScaleOnAxis();
@@ -1294,6 +1234,12 @@ class _SimulationScreenState extends State<SimulationScreen>
 
   void _advanceSimulation() {
     final now = DateTime.now();
+
+    // Auto-generate traffic zones
+    _autoGenerateTrafficZones(now);
+
+    _updatePassengerBystanderTransition(now);
+
     for (final user in _users) {
       if (!user.isMoving || user.isPhoneUser) {
         continue;
@@ -1308,15 +1254,37 @@ class _SimulationScreenState extends State<SimulationScreen>
         continue;
       }
 
-      if (_loadingEnabled &&
-          _random.nextDouble() < (_stopProbability * _frameDtSeconds)) {
-        final seconds = 3 + _random.nextInt(4);
-        _pauseUntil[user.id] = now.add(Duration(seconds: seconds));
-        final traversal = _chunkTraversalByUser[user.id];
-        if (traversal != null) {
-          traversal.accumulatedStopSeconds += seconds;
+      if (_loadingEnabled) {
+        final nextEligible = _nextStopEligibleAt[user.id];
+        final canStopNow = nextEligible == null || !nextEligible.isAfter(now);
+        if (canStopNow &&
+            _random.nextDouble() < (_stopProbability * _frameDtSeconds)) {
+          final isLongUnloadStop = _random.nextDouble() < 0.35;
+          final seconds = isLongUnloadStop
+              ? _randomStopSeconds(
+                  minSeconds: _longStopMinSeconds,
+                  maxSeconds: _longStopMaxSeconds,
+                )
+              : _randomStopSeconds(
+                  minSeconds: _shortStopMinSeconds,
+                  maxSeconds: _shortStopMaxSeconds,
+                );
+          _pauseUntil[user.id] = now.add(Duration(seconds: seconds));
+
+          final cooldownRange =
+              _maxStopCooldownSeconds - _minStopCooldownSeconds;
+          final nextCooldownSeconds =
+              _minStopCooldownSeconds + _random.nextInt(cooldownRange + 1);
+          _nextStopEligibleAt[user.id] = now.add(
+            Duration(seconds: nextCooldownSeconds),
+          );
+
+          final traversal = _chunkTraversalByUser[user.id];
+          if (traversal != null) {
+            traversal.accumulatedStopSeconds += seconds;
+          }
+          continue;
         }
-        continue;
       }
 
       final effectiveSpeed = _effectiveSpeedForUser(user);
@@ -1416,14 +1384,141 @@ class _SimulationScreenState extends State<SimulationScreen>
     });
   }
 
+  int _randomStopSeconds({required int minSeconds, required int maxSeconds}) {
+    final safeMin = math.min(minSeconds, maxSeconds);
+    final safeMax = math.max(minSeconds, maxSeconds);
+    return safeMin + _random.nextInt((safeMax - safeMin) + 1);
+  }
+
+  void _setLoadingPreset(_LoadingPreset preset) {
+    setState(() {
+      _loadingPreset = preset;
+      switch (preset) {
+        case _LoadingPreset.light:
+          _stopProbability = 0.05;
+          _minStopCooldownSeconds = 22;
+          _maxStopCooldownSeconds = 55;
+          _shortStopMinSeconds = 1;
+          _shortStopMaxSeconds = 3;
+          _longStopMinSeconds = 4;
+          _longStopMaxSeconds = 7;
+          break;
+        case _LoadingPreset.normal:
+          _stopProbability = 0.10;
+          _minStopCooldownSeconds = 12;
+          _maxStopCooldownSeconds = 36;
+          _shortStopMinSeconds = 2;
+          _shortStopMaxSeconds = 5;
+          _longStopMinSeconds = 6;
+          _longStopMaxSeconds = 11;
+          break;
+        case _LoadingPreset.congested:
+          _stopProbability = 0.22;
+          _minStopCooldownSeconds = 6;
+          _maxStopCooldownSeconds = 20;
+          _shortStopMinSeconds = 3;
+          _shortStopMaxSeconds = 6;
+          _longStopMinSeconds = 7;
+          _longStopMaxSeconds = 14;
+          break;
+      }
+      _loadingEnabled = true;
+    });
+  }
+
+  /// Auto-generate random traffic zones on road chunks every 30 seconds
+  void _autoGenerateTrafficZones(DateTime now) {
+    if (!_trafficEnabled || _routeChunks.isEmpty) {
+      return;
+    }
+
+    _lastTrafficGenerationTime ??= now;
+    final timeSinceLastGeneration = now.difference(_lastTrafficGenerationTime!);
+
+    // Regenerate traffic every 30 seconds
+    if (timeSinceLastGeneration.inSeconds >= 30) {
+      _lastTrafficGenerationTime = now;
+
+      setState(() {
+        _trafficZones.clear();
+
+        // Randomly select up to _maxTrafficLines chunks to have traffic
+        final chunkIndices = List<int>.generate(_routeChunks.length, (i) => i);
+        chunkIndices.shuffle(_random);
+
+        final numTrafficZones = math.min(
+          _maxTrafficLines,
+          math.max(1, (_routeChunks.length ~/ 4)),
+        );
+
+        for (int i = 0; i < numTrafficZones && i < chunkIndices.length; i++) {
+          final chunk = _routeChunks[chunkIndices[i]];
+          _trafficZones.add(
+            TrafficZone(
+              start: chunk.startPoint,
+              end: chunk.endPoint,
+              severity: 0.4 + (_random.nextDouble() * 0.6), // 0.4 - 1.0
+            ),
+          );
+        }
+      });
+    }
+  }
+
+  void _updatePassengerBystanderTransition(DateTime now) {
+    final repositionedRecently =
+        _lastManualPhoneRepositionAt != null &&
+        now.difference(_lastManualPhoneRepositionAt!) <
+            _SimulationScreenState._manualRepositionCooldown;
+    if (repositionedRecently) {
+      return;
+    }
+
+    if (_pendingFoundJeepVerification && _pendingFoundJeepAt != null) {
+      final elapsed = now.difference(_pendingFoundJeepAt!);
+      if (_latestPhoneInferredSpeed >=
+          _SimulationScreenState._autoPassengerSpeedThreshold) {
+        _isPassengerUser = true;
+        _pendingFoundJeepVerification = false;
+        _pendingFoundJeepAt = now;
+      } else if (elapsed >= _SimulationScreenState._falseJeepDetectionWindow) {
+        _pendingFoundJeepVerification = false;
+        _pendingFoundJeepAt = null;
+        _pendingFoundJeepMaxSpeed = 0;
+      }
+      return;
+    }
+
+    if (!_isPassengerUser || _pendingFoundJeepAt == null) {
+      return;
+    }
+
+    final passengerElapsed = now.difference(_pendingFoundJeepAt!);
+    final sustainedSlow =
+        _latestPhoneInferredSpeed <
+        (_SimulationScreenState._autoPassengerSpeedThreshold * 0.35);
+    if (passengerElapsed >=
+            _SimulationScreenState._minPassengerSessionDuration &&
+        sustainedSlow) {
+      _isPassengerUser = false;
+      _pendingFoundJeepAt = null;
+      _pendingFoundJeepMaxSpeed = 0;
+    }
+  }
+
   void _updatePhoneUserInferredSpeed(DateTime now) {
-    if (_lastPhonePositionSample == null || _lastPhonePositionSampleAt == null) {
+    if (_lastPhonePositionSample == null ||
+        _lastPhonePositionSampleAt == null) {
       _lastPhonePositionSample = _phoneUser.position;
       _lastPhonePositionSampleAt = now;
       return;
     }
-    final distance = _distanceBetween(_lastPhonePositionSample!, _phoneUser.position);
-    final elapsed = now.difference(_lastPhonePositionSampleAt!).inMilliseconds / 1000;
+    final distance = _distanceBetween(
+      _lastPhonePositionSample!,
+      _phoneUser.position,
+    );
+    final elapsed =
+        now.difference(_lastPhonePositionSampleAt!).inMilliseconds / 1000;
     if (elapsed > 0.5) {
       _latestPhoneInferredSpeed = distance / elapsed;
       _lastPhonePositionSample = _phoneUser.position;
@@ -1434,7 +1529,8 @@ class _SimulationScreenState extends State<SimulationScreen>
   void _sampleWaitPredictionIfWaiting(DateTime now) {
     if (!_isWaitingForJeep || _trackedEta == null) return;
     if (_lastWaitPredictionSampleAt != null &&
-        now.difference(_lastWaitPredictionSampleAt!) < _waitPredictionSampleInterval) {
+        now.difference(_lastWaitPredictionSampleAt!) <
+            _waitPredictionSampleInterval) {
       return;
     }
     _lastWaitPredictionSampleAt = now;
@@ -1460,7 +1556,8 @@ class _SimulationScreenState extends State<SimulationScreen>
 
   double _waitPredictionStabilityPercent() {
     if (_waitPredictionStabilitySamples == 0) return 100;
-    final avgDiff = _waitPredictionStabilityAccumulator / _waitPredictionStabilitySamples;
+    final avgDiff =
+        _waitPredictionStabilityAccumulator / _waitPredictionStabilitySamples;
     return (100 - (avgDiff * 2)).clamp(0, 100);
   }
 
@@ -1513,6 +1610,13 @@ class _SimulationScreenState extends State<SimulationScreen>
       jeepType: 'Manual Confirmation',
       ghostJeepUsed: false,
     );
+
+    setState(() {
+      _pendingFoundJeepVerification = true;
+      _pendingFoundJeepAt = now;
+      _pendingFoundJeepMaxSpeed = _latestPhoneInferredSpeed;
+      _isPassengerUser = false;
+    });
   }
 
   void _completeRoadWaitMeasurement({
@@ -1537,7 +1641,10 @@ class _SimulationScreenState extends State<SimulationScreen>
       predictionErrorSeconds: predictionError,
       accuracyPercent: accuracy,
       trafficFactor: _waitPredictedTrafficFactor,
-      chunkFlowRate: (_roadWaiterPin != null && _roadWaiterPin!.chunkId >= 0 && _roadWaiterPin!.chunkId < _routeChunks.length)
+      chunkFlowRate:
+          (_roadWaiterPin != null &&
+              _roadWaiterPin!.chunkId >= 0 &&
+              _roadWaiterPin!.chunkId < _routeChunks.length)
           ? _routeChunks[_roadWaiterPin!.chunkId].flowRateJeepsPerMinute
           : 0.0,
       ghostJeepUsed: ghostJeepUsed,
@@ -1591,7 +1698,10 @@ class _SimulationScreenState extends State<SimulationScreen>
     _isPassengerUser = false;
   }
 
-  double _calculateAccuracy({required double predicted, required double actual}) {
+  double _calculateAccuracy({
+    required double predicted,
+    required double actual,
+  }) {
     if (actual < 1) return 100;
     final error = (predicted - actual).abs();
     return (100 - (error / actual * 100)).clamp(0, 100);
@@ -1622,26 +1732,26 @@ class _SimulationScreenState extends State<SimulationScreen>
   }
 
   ({
-  int totalTests,
-  double averageAccuracyPercent,
-  double meanAbsoluteErrorSeconds,
-  double meanRelativeErrorPercent,
-  String bestRouteLabel,
-  double bestRouteAccuracyPercent,
-  String worstRouteLabel,
-  double worstRouteAccuracyPercent,
+    int totalTests,
+    double averageAccuracyPercent,
+    double meanAbsoluteErrorSeconds,
+    double meanRelativeErrorPercent,
+    String bestRouteLabel,
+    double bestRouteAccuracyPercent,
+    String worstRouteLabel,
+    double worstRouteAccuracyPercent,
   })
   _buildRollingAccuracySummary() {
     if (_etaTestRecords.isEmpty) {
       return (
-      totalTests: 0,
-      averageAccuracyPercent: 0,
-      meanAbsoluteErrorSeconds: 0,
-      meanRelativeErrorPercent: 0,
-      bestRouteLabel: 'N/A',
-      bestRouteAccuracyPercent: 0,
-      worstRouteLabel: 'N/A',
-      worstRouteAccuracyPercent: 0,
+        totalTests: 0,
+        averageAccuracyPercent: 0,
+        meanAbsoluteErrorSeconds: 0,
+        meanRelativeErrorPercent: 0,
+        bestRouteLabel: 'N/A',
+        bestRouteAccuracyPercent: 0,
+        worstRouteLabel: 'N/A',
+        worstRouteAccuracyPercent: 0,
       );
     }
     var sumAcc = 0.0;
@@ -1650,7 +1760,10 @@ class _SimulationScreenState extends State<SimulationScreen>
     for (final r in _etaTestRecords) {
       sumAcc += r.accuracyPercent;
       sumAbsErr += r.predictionErrorSeconds.abs();
-      sumRelErr += (r.predictionErrorSeconds.abs() / r.actualWaitTimeSeconds.clamp(1, 9999)) * 100;
+      sumRelErr +=
+          (r.predictionErrorSeconds.abs() /
+              r.actualWaitTimeSeconds.clamp(1, 9999)) *
+          100;
     }
     final avgAcc = sumAcc / _etaTestRecords.length;
     final mae = sumAbsErr / _etaTestRecords.length;
@@ -1670,14 +1783,16 @@ class _SimulationScreenState extends State<SimulationScreen>
     });
 
     return (
-    totalTests: _etaTestRecords.length,
-    averageAccuracyPercent: avgAcc,
-    meanAbsoluteErrorSeconds: mae,
-    meanRelativeErrorPercent: mre,
-    bestRouteLabel: bestId == null ? 'N/A' : 'Chunk ${_chunkCode(bestId!)}',
-    bestRouteAccuracyPercent: bestAcc == -1 ? 0 : bestAcc,
-    worstRouteLabel: worstId == null ? 'N/A' : 'Chunk ${_chunkCode(worstId!)}',
-    worstRouteAccuracyPercent: worstAcc == 101 ? 0 : worstAcc,
+      totalTests: _etaTestRecords.length,
+      averageAccuracyPercent: avgAcc,
+      meanAbsoluteErrorSeconds: mae,
+      meanRelativeErrorPercent: mre,
+      bestRouteLabel: bestId == null ? 'N/A' : 'Chunk ${_chunkCode(bestId!)}',
+      bestRouteAccuracyPercent: bestAcc == -1 ? 0 : bestAcc,
+      worstRouteLabel: worstId == null
+          ? 'N/A'
+          : 'Chunk ${_chunkCode(worstId!)}',
+      worstRouteAccuracyPercent: worstAcc == 101 ? 0 : worstAcc,
     );
   }
 
@@ -1693,7 +1808,8 @@ class _SimulationScreenState extends State<SimulationScreen>
       final visible = <int>{};
       for (final target in users) {
         if (observer.id == target.id) continue;
-        if (_distanceBetween(observer.position, target.position) <= observer.visibilityRadius) {
+        if (_distanceBetween(observer.position, target.position) <=
+            observer.visibilityRadius) {
           visible.add(target.id);
         }
       }
@@ -1720,7 +1836,10 @@ class _SimulationScreenState extends State<SimulationScreen>
         if (visited.contains(other.id)) continue;
         final dist = _distanceBetween(user.position, other.position);
         final speedDiff = (user.speed - other.speed).abs();
-        final dirSim = _dot(_normalizeOffset(user.direction), _normalizeOffset(other.direction));
+        final dirSim = _dot(
+          _normalizeOffset(user.direction),
+          _normalizeOffset(other.direction),
+        );
 
         if (dist < _clusterDistanceThresholdPx &&
             speedDiff < _clusterSpeedDiffThreshold &&
@@ -1766,9 +1885,890 @@ class _SimulationScreenState extends State<SimulationScreen>
     required NearestRoadPoint pin,
     required RoadDirection direction,
   }) {
+    // Handle chunks with no intelligence yet
+    if (pin.chunkId < 0 || pin.chunkId >= _routeChunks.length) {
+      return 0;
+    }
     final chunk = _routeChunks[pin.chunkId];
     final flow = chunk.flowRateJeepsPerMinute;
     if (flow <= 0.05) return 0;
     return (1 / flow) * 60 * 0.5;
+  }
+
+  // ── Ghost intelligence: bulk helpers ─────────────────────────────────────
+
+  /// Converts ALL currently-moving mock jeeps into ghost jeeps in one tap.
+  /// The jeep data continues feeding chunk statistics; visually they become
+  /// semi-transparent projected markers.
+  void _convertAllMockJeepsToGhost() {
+    final now = DateTime.now();
+    _applyState(() {
+      for (final user in _users) {
+        if (user.isPhoneUser || !user.isMockUser) continue;
+        if (!user.isMoving) continue;
+        if (_ghostJeepsBySourceUser.containsKey(user.id)) continue;
+        _convertObservedJeepToGhost(user, now);
+      }
+    });
+  }
+
+  /// Restores ALL ghost jeeps back to observed (moving) status.
+  /// Their position is restored from the ghost's last projected location,
+  /// and they re-join chunk traversal immediately.
+  void _restoreAllGhostJeeps() {
+    final now = DateTime.now();
+    _applyState(() {
+      final toRestore = Map<int, GhostJeep>.from(_ghostJeepsBySourceUser);
+      for (final entry in toRestore.entries) {
+        User? user;
+        for (final candidate in _users) {
+          if (candidate.id == entry.key) {
+            user = candidate;
+            break;
+          }
+        }
+        if (user == null) continue;
+        _restoreObservedFromGhost(user: user, ghost: entry.value);
+        _ghostJeepsBySourceUser.remove(entry.key);
+        _initializeKalmanStateFor(user, now);
+      }
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIMULATION LAB UI WIDGETS
+// These are purely presentational — all logic stays in _SimulationScreenState
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _LabChip extends StatelessWidget {
+  final String label;
+  final String tooltip;
+  const _LabChip({required this.label, required this.tooltip});
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color color;
+  const _StatusPill({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 12),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CanvasToggleBtn extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  const _CanvasToggleBtn({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: active ? const Color(0xFF2E9E99) : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 4),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: active ? Colors.white : const Color(0xFF2E9E99),
+              size: 14,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: active ? Colors.white : const Color(0xFF2E9E99),
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Replaces the old MapLegend with a SakaySain-styled version
+class _SimLegend extends StatefulWidget {
+  const _SimLegend();
+  @override
+  State<_SimLegend> createState() => _SimLegendState();
+}
+
+class _SimLegendState extends State<_SimLegend> {
+  bool _expanded = false;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _expanded = !_expanded),
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xF01E7A76),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 6),
+          ],
+        ),
+        padding: const EdgeInsets.all(8),
+        child: _expanded
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Icon(
+                        Icons.legend_toggle,
+                        color: Colors.white70,
+                        size: 14,
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        'Legend',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  ..._legendItems.map(
+                    (item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 10,
+                            height: 10,
+                            decoration: BoxDecoration(
+                              color: item.$2,
+                              shape: item.$3
+                                  ? BoxShape.circle
+                                  : BoxShape.rectangle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            item.$1,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            : const Icon(Icons.legend_toggle, color: Colors.white70, size: 18),
+      ),
+    );
+  }
+
+  static const List<(String, Color, bool)> _legendItems = [
+    ('Phone user', Colors.blue, true),
+    ('Mock jeep (moving)', Colors.green, false),
+    ('Ghost jeep (predicted)', Colors.grey, false),
+    ('Waiting user', Color(0xFFCCCCCC), true),
+    ('Cluster', Colors.orange, false),
+    ('Road waiter pin', Colors.yellow, true),
+    ('Road chunk', Colors.blue, false),
+    ('Flow heatmap (high)', Colors.redAccent, false),
+    ('Traffic zone', Colors.purpleAccent, false),
+    ('Snapzone radius', Colors.orange, true),
+  ];
+}
+
+// ── Dev panel (collapsible bottom bar) ────────────────────────────────────
+
+class _SimDevPanel extends StatefulWidget {
+  // Primary actions
+  final bool isWaiting;
+  final bool isPlacingPin;
+  final VoidCallback onTrack;
+  final VoidCallback? onFoundJeep;
+  final VoidCallback onFilterJeeps;
+  // Dev tools
+  final bool isDeveloperMode;
+  final ValueChanged<bool> onToggleDeveloperMode;
+  final bool isRoadEditorMode;
+  final bool hasDraftPoints;
+  final bool canSaveDraft;
+  final VoidCallback onStartRoadEditor;
+  final VoidCallback? onClearDraft;
+  final VoidCallback? onSaveDraft;
+  final VoidCallback? onCancelRoadEditor;
+  final VoidCallback onLocalInsights;
+  final VoidCallback onMapRouteEditor;
+  final VoidCallback onRouteProfiles;
+  final bool isPlacingMockUser;
+  final VoidCallback onToggleMockUser;
+  final bool isPlacingTraffic;
+  final VoidCallback onToggleTraffic;
+  final VoidCallback onRandomizeTraffic;
+  // Toggles
+  final bool trafficEnabled;
+  final ValueChanged<bool> onTrafficEnabled;
+  final bool loadingEnabled;
+  final ValueChanged<bool> onLoadingEnabled;
+  final _LoadingPreset loadingPreset;
+  final ValueChanged<_LoadingPreset> onLoadingPresetChanged;
+  final bool showTrails;
+  final ValueChanged<bool> onShowTrails;
+  final bool devShowEta;
+  final ValueChanged<bool> onDevShowEta;
+  final bool devShowChunkStats;
+  final ValueChanged<bool> onDevShowChunkStats;
+  final bool autoStop;
+  final ValueChanged<bool> onAutoStop;
+  final bool includeGhosts;
+  final ValueChanged<bool> onIncludeGhosts;
+  // Ghost intelligence controls
+  final bool randomGhostToggleEnabled;
+  final ValueChanged<bool> onRandomGhostToggle;
+  final double randomGhostLikelihood;
+  final ValueChanged<double> onRandomGhostLikelihood;
+  final VoidCallback onConvertAllToGhost;
+  final VoidCallback onRestoreAllFromGhost;
+  // Sliders
+  final String controlUserLabel;
+  final double controlUserSpeed;
+  final ValueChanged<double> onSpeedChanged;
+  final double controlUserRadius;
+  final double minRadius;
+  final double maxRadius;
+  final ValueChanged<double> onRadiusChanged;
+  final double speedStep;
+  final double visibilityStep;
+
+  const _SimDevPanel({
+    required this.isWaiting,
+    required this.isPlacingPin,
+    required this.onTrack,
+    required this.onFoundJeep,
+    required this.onFilterJeeps,
+    required this.isDeveloperMode,
+    required this.onToggleDeveloperMode,
+    required this.isRoadEditorMode,
+    required this.hasDraftPoints,
+    required this.canSaveDraft,
+    required this.onStartRoadEditor,
+    required this.onClearDraft,
+    required this.onSaveDraft,
+    required this.onCancelRoadEditor,
+    required this.onLocalInsights,
+    required this.onMapRouteEditor,
+    required this.onRouteProfiles,
+    required this.isPlacingMockUser,
+    required this.onToggleMockUser,
+    required this.isPlacingTraffic,
+    required this.onToggleTraffic,
+    required this.onRandomizeTraffic,
+    required this.trafficEnabled,
+    required this.onTrafficEnabled,
+    required this.loadingEnabled,
+    required this.onLoadingEnabled,
+    required this.loadingPreset,
+    required this.onLoadingPresetChanged,
+    required this.showTrails,
+    required this.onShowTrails,
+    required this.devShowEta,
+    required this.onDevShowEta,
+    required this.devShowChunkStats,
+    required this.onDevShowChunkStats,
+    required this.autoStop,
+    required this.onAutoStop,
+    required this.includeGhosts,
+    required this.onIncludeGhosts,
+    required this.randomGhostToggleEnabled,
+    required this.onRandomGhostToggle,
+    required this.randomGhostLikelihood,
+    required this.onRandomGhostLikelihood,
+    required this.onConvertAllToGhost,
+    required this.onRestoreAllFromGhost,
+    required this.controlUserLabel,
+    required this.controlUserSpeed,
+    required this.onSpeedChanged,
+    required this.controlUserRadius,
+    required this.minRadius,
+    required this.maxRadius,
+    required this.onRadiusChanged,
+    required this.speedStep,
+    required this.visibilityStep,
+  });
+
+  @override
+  State<_SimDevPanel> createState() => _SimDevPanelState();
+}
+
+class _SimDevPanelState extends State<_SimDevPanel> {
+  bool _expanded = true;
+
+  @override
+  void didUpdateWidget(covariant _SimDevPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isDeveloperMode && widget.isDeveloperMode) {
+      _expanded = true;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF1E7A76),
+        boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 10)],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // ── ALWAYS-VISIBLE ACTION ROW ─────────────────────────
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  // Track button
+                  _PanelBtn(
+                    label: widget.isPlacingPin
+                        ? 'Placing...'
+                        : widget.isWaiting
+                        ? 'Tracking'
+                        : 'Track',
+                    icon: Icons.location_searching,
+                    active: widget.isWaiting || widget.isPlacingPin,
+                    onTap: widget.onTrack,
+                  ),
+                  const SizedBox(width: 8),
+                  // Found Jeep button
+                  _PanelBtn(
+                    label: 'Found Jeep',
+                    icon: Icons.directions_bus,
+                    active: widget.isWaiting,
+                    onTap: widget.onFoundJeep,
+                    enabled: widget.isWaiting,
+                  ),
+                  const SizedBox(width: 8),
+                  // Filter
+                  _PanelBtn(
+                    label: 'Filter',
+                    icon: Icons.filter_list,
+                    onTap: widget.onFilterJeeps,
+                  ),
+                  const Spacer(),
+                  // Dev mode toggle
+                  Row(
+                    children: [
+                      Text(
+                        'DEV',
+                        style: TextStyle(
+                          color: widget.isDeveloperMode
+                              ? Colors.white
+                              : Colors.white38,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Transform.scale(
+                        scale: 0.75,
+                        child: Switch(
+                          value: widget.isDeveloperMode,
+                          onChanged: widget.onToggleDeveloperMode,
+                          activeColor: Colors.white,
+                          activeTrackColor: const Color(0xFF2E9E99),
+                          inactiveThumbColor: Colors.white38,
+                          inactiveTrackColor: Colors.white12,
+                        ),
+                      ),
+                    ],
+                  ),
+                  // Expand/collapse chevron
+                  if (widget.isDeveloperMode)
+                    GestureDetector(
+                      onTap: () => setState(() => _expanded = !_expanded),
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Icon(
+                          _expanded
+                              ? Icons.keyboard_arrow_down
+                              : Icons.keyboard_arrow_up,
+                          color: Colors.white70,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+
+            // ── EXPANDED DEV TOOLS ────────────────────────────────
+            if (widget.isDeveloperMode && _expanded)
+              Container(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.40,
+                ),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF164E4A),
+                  border: Border(
+                    top: BorderSide(color: Colors.white12, width: 1),
+                  ),
+                ),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Road tools
+                      _SectionLabel('Road Tools'),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _SmallBtn(
+                            label: widget.isRoadEditorMode
+                                ? 'Editing...'
+                                : 'Road Editor',
+                            onTap: widget.onStartRoadEditor,
+                          ),
+                          _SmallBtn(
+                            label: 'Clear Draft',
+                            onTap: widget.onClearDraft,
+                            enabled: widget.hasDraftPoints,
+                          ),
+                          _SmallBtn(
+                            label: 'Save Draft',
+                            onTap: widget.onSaveDraft,
+                            enabled: widget.canSaveDraft,
+                            highlight: true,
+                          ),
+                          _SmallBtn(
+                            label: 'Cancel Edit',
+                            onTap: widget.onCancelRoadEditor,
+                            enabled: widget.isRoadEditorMode,
+                          ),
+                          _SmallBtn(
+                            label: 'Map Route Editor',
+                            onTap: widget.onMapRouteEditor,
+                          ),
+                          _SmallBtn(
+                            label: 'Load Route',
+                            onTap: widget.onRouteProfiles,
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 10),
+                      _SectionLabel('Simulation Tools'),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _SmallBtn(
+                            label: widget.isPlacingMockUser
+                                ? 'Stop Placing'
+                                : 'Place Jeep',
+                            onTap: widget.onToggleMockUser,
+                            active: widget.isPlacingMockUser,
+                          ),
+                          _SmallBtn(
+                            label: 'Random Traffic',
+                            onTap: widget.onToggleTraffic,
+                            active: widget.isPlacingTraffic,
+                          ),
+                          _SmallBtn(
+                            label: 'Randomize Traffic',
+                            onTap: widget.onRandomizeTraffic,
+                          ),
+                          _SmallBtn(
+                            label: 'Local Insights',
+                            onTap: widget.onLocalInsights,
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 10),
+                      _SectionLabel('Toggles'),
+                      _ToggleRow(
+                        'Traffic Enabled',
+                        widget.trafficEnabled,
+                        widget.onTrafficEnabled,
+                      ),
+                      _ToggleRow(
+                        'Mock Loading',
+                        widget.loadingEnabled,
+                        widget.onLoadingEnabled,
+                      ),
+                      const Text(
+                        'Loading Preset',
+                        style: TextStyle(color: Colors.white60, fontSize: 11),
+                      ),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _SmallBtn(
+                            label: 'Light',
+                            active:
+                                widget.loadingPreset == _LoadingPreset.light,
+                            onTap: () => widget.onLoadingPresetChanged(
+                              _LoadingPreset.light,
+                            ),
+                          ),
+                          _SmallBtn(
+                            label: 'Normal',
+                            active:
+                                widget.loadingPreset == _LoadingPreset.normal,
+                            onTap: () => widget.onLoadingPresetChanged(
+                              _LoadingPreset.normal,
+                            ),
+                          ),
+                          _SmallBtn(
+                            label: 'Congested',
+                            active:
+                                widget.loadingPreset ==
+                                _LoadingPreset.congested,
+                            onTap: () => widget.onLoadingPresetChanged(
+                              _LoadingPreset.congested,
+                            ),
+                          ),
+                        ],
+                      ),
+                      _ToggleRow(
+                        'Show Trails',
+                        widget.showTrails,
+                        widget.onShowTrails,
+                      ),
+                      _ToggleRow(
+                        'Show ETA Data',
+                        widget.devShowEta,
+                        widget.onDevShowEta,
+                      ),
+                      _ToggleRow(
+                        'Show Chunk Stats',
+                        widget.devShowChunkStats,
+                        widget.onDevShowChunkStats,
+                      ),
+                      _ToggleRow(
+                        'Auto-stop on Arrival',
+                        widget.autoStop,
+                        widget.onAutoStop,
+                      ),
+                      _ToggleRow(
+                        'Include Ghost Jeeps',
+                        widget.includeGhosts,
+                        widget.onIncludeGhosts,
+                      ),
+
+                      const SizedBox(height: 10),
+                      _SectionLabel('Ghost Jeep Intelligence'),
+                      _ToggleRow(
+                        'Random Ghost Transitions',
+                        widget.randomGhostToggleEnabled,
+                        widget.onRandomGhostToggle,
+                      ),
+                      if (widget.randomGhostToggleEnabled) ...[
+                        const Text(
+                          'Transition Likelihood',
+                          style: TextStyle(color: Colors.white60, fontSize: 11),
+                        ),
+                        Slider(
+                          value: widget.randomGhostLikelihood.clamp(0.01, 0.5),
+                          min: 0.01,
+                          max: 0.5,
+                          divisions: 49,
+                          label:
+                              '${(widget.randomGhostLikelihood * 100).toStringAsFixed(0)}%',
+                          activeColor: Colors.purpleAccent,
+                          inactiveColor: Colors.white24,
+                          onChanged: widget.onRandomGhostLikelihood,
+                        ),
+                      ],
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _SmallBtn(
+                            label: '👻 All → Ghost',
+                            onTap: widget.onConvertAllToGhost,
+                          ),
+                          _SmallBtn(
+                            label: '🚌 Restore All',
+                            onTap: widget.onRestoreAllFromGhost,
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 10),
+                      _SectionLabel('Control: ${widget.controlUserLabel}'),
+                      const Text(
+                        'Speed',
+                        style: TextStyle(color: Colors.white60, fontSize: 11),
+                      ),
+                      Slider(
+                        value: widget.controlUserSpeed,
+                        min: 0,
+                        max: 100,
+                        divisions: (100 / widget.speedStep).round(),
+                        label: widget.controlUserSpeed.toStringAsFixed(0),
+                        activeColor: const Color(0xFF2E9E99),
+                        inactiveColor: Colors.white24,
+                        onChanged: widget.onSpeedChanged,
+                      ),
+                      const Text(
+                        'Visibility Radius',
+                        style: TextStyle(color: Colors.white60, fontSize: 11),
+                      ),
+                      Slider(
+                        value: widget.controlUserRadius,
+                        min: widget.minRadius,
+                        max: widget.maxRadius,
+                        divisions:
+                            ((widget.maxRadius - widget.minRadius) /
+                                    widget.visibilityStep)
+                                .round(),
+                        label: widget.controlUserRadius.toStringAsFixed(0),
+                        activeColor: const Color(0xFF2E9E99),
+                        inactiveColor: Colors.white24,
+                        onChanged: widget.onRadiusChanged,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Panel micro-widgets ──────────────────────────────────────────────────
+
+class _PanelBtn extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final VoidCallback? onTap;
+  final bool active;
+  final bool enabled;
+
+  const _PanelBtn({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.active = false,
+    this.enabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final effectiveEnabled = enabled && onTap != null;
+    return GestureDetector(
+      onTap: effectiveEnabled ? onTap : null,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 150),
+        opacity: effectiveEnabled ? 1.0 : 0.4,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: active ? Colors.white : Colors.white.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: active ? Colors.white : Colors.white.withOpacity(0.3),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                color: active ? const Color(0xFF1E7A76) : Colors.white,
+                size: 14,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(
+                  color: active ? const Color(0xFF1E7A76) : Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SmallBtn extends StatelessWidget {
+  final String label;
+  final VoidCallback? onTap;
+  final bool enabled;
+  final bool active;
+  final bool highlight;
+
+  const _SmallBtn({
+    required this.label,
+    required this.onTap,
+    this.enabled = true,
+    this.active = false,
+    this.highlight = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final canTap = enabled && onTap != null;
+    return GestureDetector(
+      onTap: canTap ? onTap : null,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 150),
+        opacity: canTap ? 1.0 : 0.35,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: active
+                ? const Color(0xFF2E9E99)
+                : highlight
+                ? Colors.white
+                : Colors.white.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.white.withOpacity(0.25)),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: highlight ? const Color(0xFF1E7A76) : Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  const _SectionLabel(this.text);
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.white70,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+}
+
+class _ToggleRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const _ToggleRow(this.label, this.value, this.onChanged);
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+          ),
+        ),
+        Transform.scale(
+          scale: 0.75,
+          child: Switch(
+            value: value,
+            onChanged: onChanged,
+            activeColor: Colors.white,
+            activeTrackColor: const Color(0xFF2E9E99),
+            inactiveThumbColor: Colors.white38,
+            inactiveTrackColor: Colors.white12,
+          ),
+        ),
+      ],
+    );
   }
 }

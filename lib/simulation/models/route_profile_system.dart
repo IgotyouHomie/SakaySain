@@ -40,7 +40,9 @@ class JeepRouteProfile {
 
     final cumulativeLengths = <double>[0];
     for (int i = 0; i < path.length - 1; i++) {
-      cumulativeLengths.add(cumulativeLengths.last + (path[i + 1] - path[i]).distance);
+      cumulativeLengths.add(
+        cumulativeLengths.last + (path[i + 1] - path[i]).distance,
+      );
     }
     final totalLength = cumulativeLengths.last;
 
@@ -66,6 +68,8 @@ class JeepRouteProfile {
       chunks.add(
         RoadChunk(
           id: id,
+          roadLabel: 'Route',
+          indexInRoad: chunks.length + 1,
           startPoint: pointAtProgress(current),
           endPoint: pointAtProgress(next),
           lengthMeters: next - current,

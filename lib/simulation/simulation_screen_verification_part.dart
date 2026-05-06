@@ -25,7 +25,10 @@ extension _SimulationScreenVerificationPart on _SimulationScreenState {
               children: [
                 Text(
                   'Verify Route Accuracy: Chunk ${chunk.forwardDirectionLabel}',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(height: 12),
                 const Text('Is the jeep route timing/location accurate here?'),
@@ -43,7 +46,9 @@ extension _SimulationScreenVerificationPart on _SimulationScreenState {
                       },
                       icon: const Icon(Icons.check_circle),
                       label: const Text('Accurate'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade100),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green.shade100,
+                      ),
                     ),
                     ElevatedButton.icon(
                       onPressed: () {
@@ -55,7 +60,9 @@ extension _SimulationScreenVerificationPart on _SimulationScreenState {
                       },
                       icon: const Icon(Icons.error),
                       label: const Text('Inaccurate'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade100),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade100,
+                      ),
                     ),
                   ],
                 ),
@@ -80,7 +87,9 @@ extension _SimulationScreenVerificationPart on _SimulationScreenState {
       targetType: CommunityVoteTargetType.routeAccuracy,
       targetId: chunkId.toString(),
       choice: choice,
-      role: _isPassengerUser ? CommunityVoteRole.passenger : CommunityVoteRole.pedestrian,
+      role: _isPassengerUser
+          ? CommunityVoteRole.passenger
+          : CommunityVoteRole.pedestrian,
       weight: trust.score,
       createdAt: DateTime.now(),
     );

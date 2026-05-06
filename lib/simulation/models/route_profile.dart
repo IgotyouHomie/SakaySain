@@ -21,9 +21,7 @@ class RouteProfile {
     return {
       'id': id,
       'name': name,
-      'world': worldPoints
-          .map((e) => {'x': e.dx, 'y': e.dy})
-          .toList(),
+      'world': worldPoints.map((e) => {'x': e.dx, 'y': e.dy}).toList(),
       'map': mapPoints
           .map((e) => {'lat': e.latitude, 'lng': e.longitude})
           .toList(),
@@ -35,16 +33,18 @@ class RouteProfile {
       id: json['id'] ?? '',
       name: json['name'] ?? '',
       worldPoints: (json['world'] as List? ?? [])
-          .map((p) => Offset(
-                (p['x'] as num).toDouble(),
-                (p['y'] as num).toDouble(),
-              ))
+          .map(
+            (p) =>
+                Offset((p['x'] as num).toDouble(), (p['y'] as num).toDouble()),
+          )
           .toList(),
       mapPoints: (json['map'] as List? ?? json['points'] as List? ?? [])
-          .map((e) => LatLng(
-                (e['lat'] as num).toDouble(),
-                (e['lng'] as num).toDouble(),
-              ))
+          .map(
+            (e) => LatLng(
+              (e['lat'] as num).toDouble(),
+              (e['lng'] as num).toDouble(),
+            ),
+          )
           .toList(),
     );
   }

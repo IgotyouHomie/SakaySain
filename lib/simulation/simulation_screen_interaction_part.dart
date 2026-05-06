@@ -54,12 +54,13 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
       return;
     }
 
+    final wasPlacingMock = _isPlacingMockUser;
     _applyState(() {
       if (_isPlacingTrafficZone) {
         _placeTrafficZoneAt(insideWorldPoint);
         _isPlacingTrafficZone = false;
       } else if (_isPlacingMockUser) {
-        _placeMockUserAt(insideWorldPoint);
+        // defer opening modal until after state update to avoid build-time dialog
         _isPlacingMockUser = false;
       } else {
         final selectedFromTap = _pickUserNearPoint(insideWorldPoint);
@@ -74,73 +75,267 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
 
       _frame++;
     });
+
+    if (wasPlacingMock) {
+      _openMockJeepPlacementPanel(insideWorldPoint);
+    }
   }
 
   User? _pickUserNearPoint(Offset point) {
     User? closest;
     var minDistance = double.infinity;
 
+    final thresholdWorld =
+        (_SimulationScreenState._selectionTapThreshold / _zoom).clamp(
+          6.0,
+          40.0,
+        );
+
     for (final user in _users) {
       final distance = _distanceBetween(point, user.position);
-      if (distance <= _SimulationScreenState._selectionTapThreshold &&
-          distance < minDistance) {
+      if (distance <= thresholdWorld && distance < minDistance) {
+        minDistance = distance;
         closest = user;
-        minDistance = distance;
       }
     }
+
     return closest;
   }
 
-  RoadChunk? _pickRoadChunkAtPoint(Offset point) {
-    final thresholdWorld = (20 / _zoom).clamp(8.0, 26.0);
-    RoadChunk? closest;
+  String _routeLabelForId(String routeId) {
+    for (final route in _availableRoutes) {
+      if (route.id == routeId) {
+        return route.jeepName;
+      }
+    }
+    return routeId;
+  }
+
+  ({Offset point, int segmentIndex, double t}) _nearestPointOnPath(
+    List<Offset> path,
+    Offset point,
+  ) {
+    var closestPoint = path.first;
+    var closestSegmentIndex = 0;
+    var closestT = 0.0;
     var minDistance = double.infinity;
 
-    for (final chunk in _routeChunks) {
-      final distance = _distancePointToSegment(
+    for (int segmentIndex = 0; segmentIndex < path.length - 1; segmentIndex++) {
+      final projection = _projectPointToSegment(
         point,
-        chunk.startPoint,
-        chunk.endPoint,
+        path[segmentIndex],
+        path[segmentIndex + 1],
       );
-      if (distance <= thresholdWorld && distance < minDistance) {
+      final distance = _distanceBetween(point, projection.point);
+      if (distance < minDistance) {
         minDistance = distance;
-        closest = chunk;
+        closestPoint = projection.point;
+        closestSegmentIndex = segmentIndex;
+        closestT = projection.t;
       }
     }
-    return closest;
+
+    return (
+      point: closestPoint,
+      segmentIndex: closestSegmentIndex,
+      t: closestT,
+    );
   }
 
-  RoadChunk? _pickTopFlowBadgeChunkAtPoint(Offset point) {
-    if (!_showFlowHeatOverlay || _routeChunks.isEmpty) {
-      return null;
+  Future<void> _openMockJeepPlacementPanel(Offset worldPoint) async {
+    if (_availableJeepTypes.isEmpty || _availableRoutes.isEmpty) {
+      _placeMockUserAt(worldPoint);
+      return;
     }
 
-    final topFlowChunks =
-    _routeChunks.where((chunk) => chunk.flowRateJeepsPerMinute > 0).toList()
-      ..sort(
-            (a, b) =>
-            b.flowRateJeepsPerMinute.compareTo(a.flowRateJeepsPerMinute),
-      );
+    final firstJeepType = _availableJeepTypes.first;
+    String selectedJeepType = firstJeepType.name;
+    String selectedRouteId = firstJeepType.assignedRouteId;
 
-    final top3 = topFlowChunks.take(3);
-    final thresholdWorld = (28 / _zoom).clamp(10.0, 38.0);
+    final result = await showModalBottomSheet<({String jeepType, String routeId})>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final selectedJeep = _availableJeepTypes.firstWhere(
+              (jt) => jt.name == selectedJeepType,
+              orElse: () => firstJeepType,
+            );
+            final assignedRouteId = selectedJeep.assignedRouteId;
+            final isRouteMatch = selectedRouteId == assignedRouteId;
+            final assignedRouteLabel = _routeLabelForId(assignedRouteId);
 
-    RoadChunk? closest;
-    var minDistance = double.infinity;
+            return SafeArea(
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Color(0xFF164E4A),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Place Jeep',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Choose a jeep type and the route it is allowed to run on.',
+                      style: TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: selectedJeepType,
+                      dropdownColor: const Color(0xFF0D3D3B),
+                      decoration: const InputDecoration(
+                        labelText: 'Jeep Type',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white24),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Color(0xFF2E9E99)),
+                        ),
+                      ),
+                      items: _availableJeepTypes
+                          .map(
+                            (jt) => DropdownMenuItem(
+                              value: jt.name,
+                              child: Text(
+                                '${jt.name}  •  ${_routeLabelForId(jt.assignedRouteId)}',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        final jeep = _availableJeepTypes.firstWhere(
+                          (jt) => jt.name == value,
+                          orElse: () => firstJeepType,
+                        );
+                        setModalState(() {
+                          selectedJeepType = jeep.name;
+                          selectedRouteId = jeep.assignedRouteId;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<String>(
+                      value: selectedRouteId,
+                      dropdownColor: const Color(0xFF0D3D3B),
+                      decoration: const InputDecoration(
+                        labelText: 'Route',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white24),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Color(0xFF2E9E99)),
+                        ),
+                      ),
+                      items: _availableRoutes
+                          .map(
+                            (route) => DropdownMenuItem(
+                              value: route.id,
+                              child: Text(
+                                route.jeepName,
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setModalState(() => selectedRouteId = value);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: isRouteMatch
+                            ? Colors.green.withValues(alpha: 0.14)
+                            : Colors.redAccent.withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isRouteMatch
+                              ? Colors.green.withValues(alpha: 0.5)
+                              : Colors.redAccent.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      child: Text(
+                        isRouteMatch
+                            ? 'Ready: $selectedJeepType will run on $assignedRouteLabel.'
+                            : 'Route mismatch: $selectedJeepType must use $assignedRouteLabel.',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: isRouteMatch
+                                ? () => Navigator.pop(context, (
+                                    jeepType: selectedJeepType,
+                                    routeId: selectedRouteId,
+                                  ))
+                                : null,
+                            child: const Text('Place Jeep'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
 
-    for (final chunk in top3) {
-      final center = Offset(
-        (chunk.startPoint.dx + chunk.endPoint.dx) / 2,
-        (chunk.startPoint.dy + chunk.endPoint.dy) / 2,
-      );
-      final distance = _distanceBetween(point, center);
-      if (distance <= thresholdWorld && distance < minDistance) {
-        minDistance = distance;
-        closest = chunk;
-      }
+    if (result == null || !mounted) {
+      return;
     }
 
-    return closest;
+    final selectedJeep = _availableJeepTypes.firstWhere(
+      (jt) => jt.name == result.jeepType,
+      orElse: () => firstJeepType,
+    );
+    if (selectedJeep.assignedRouteId != result.routeId) {
+      _showSnack(
+        'Route mismatch: ${selectedJeep.name} must use ${_routeLabelForId(selectedJeep.assignedRouteId)}.',
+      );
+      return;
+    }
+
+    _placeMockUserAt(
+      worldPoint,
+      jeepType: selectedJeep.name,
+      routeId: result.routeId,
+    );
   }
 
   void _showRoadChunkStatsPanel(RoadChunk chunk) {
@@ -151,8 +346,7 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
       ...chunk.lastJeepPassTimeByType.keys,
       ...chunk.avgTravelTimeByType.keys,
       ...chunk.jeepArrivalProbabilityByType.keys,
-    }.toList()
-      ..sort();
+    }.toList()..sort();
 
     String formatSeconds(double value) {
       if (value <= 0) return 'N/A';
@@ -194,7 +388,9 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
                     'Average Arrival Interval',
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
-                  Text('All Jeeps: ${formatSeconds(chunk.avgArrivalIntervalAll)}'),
+                  Text(
+                    'All Jeeps: ${formatSeconds(chunk.avgArrivalIntervalAll)}',
+                  ),
                   Text(
                     'Observed: ${formatSeconds(chunk.avgArrivalIntervalAllObserved)}',
                   ),
@@ -206,7 +402,8 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
                     const Text('No per-type interval data yet')
                   else
                     ...allTypes.map((type) {
-                      final interval = chunk.avgArrivalIntervalByType[type] ?? 0;
+                      final interval =
+                          chunk.avgArrivalIntervalByType[type] ?? 0;
                       final observed =
                           chunk.avgArrivalIntervalByTypeObserved[type] ?? 0;
                       final speculative =
@@ -247,9 +444,9 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
                   else
                     ...allTypes.map((type) {
                       final observed =
-                      chunk.lastJeepPassTimeByTypeObserved[type];
+                          chunk.lastJeepPassTimeByTypeObserved[type];
                       final speculative =
-                      chunk.lastJeepPassTimeByTypeSpeculative[type];
+                          chunk.lastJeepPassTimeByTypeSpeculative[type];
                       final merged = chunk.lastJeepPassTimeByType[type];
                       return Text(
                         '$type: ${formatTime(merged)} (obs ${formatTime(observed)}, spec ${formatTime(speculative)})',
@@ -283,7 +480,8 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
                     const Text('No per-type flow data yet')
                   else
                     ...allTypes.map((type) {
-                      final flow = chunk.flowRateJeepsPerMinuteByType[type] ?? 0;
+                      final flow =
+                          chunk.flowRateJeepsPerMinuteByType[type] ?? 0;
                       return Text(
                         '$type: ${flow.toStringAsFixed(2)} jeeps/min',
                       );
@@ -312,44 +510,159 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
   void _togglePlaceTrafficZone() {
     if (!_isDeveloperMode) return;
     _applyState(() {
-      _isPlacingTrafficZone = !_isPlacingTrafficZone;
-      if (_isPlacingTrafficZone) {
-        _isPlacingMockUser = false;
-        _isPlacingRoadWaiterPin = false;
-        _isRoadEditorMode = false;
-        _isAddingRoadPoints = false;
-        _draftRoutePoints.clear();
-      }
+      _isPlacingTrafficZone = false;
+      _isPlacingMockUser = false;
+      _isPlacingRoadWaiterPin = false;
+      _isRoadEditorMode = false;
+      _isAddingRoadPoints = false;
+      _draftRoutePoints.clear();
     });
+    _randomizeTrafficZones();
+  }
+
+  /// Computes the actual compass-like label for a road chunk direction.
+  /// Uses the vector angle of the chunk segment — not hardcoded L/R.
+  String _directionLabel(Offset from, Offset to, bool isForward) {
+    final dx = isForward ? (to.dx - from.dx) : (from.dx - to.dx);
+    final dy = isForward ? (to.dy - from.dy) : (from.dy - to.dy);
+    // atan2: y-axis is inverted in canvas space (dy positive = down)
+    final angle = math.atan2(-dy, dx) * 180 / math.pi;
+    // Map angle to cardinal/intercardinal
+    if (angle >= -22.5 && angle < 22.5) return 'East →';
+    if (angle >= 22.5 && angle < 67.5) return 'North-East ↗';
+    if (angle >= 67.5 && angle < 112.5) return 'North ↑';
+    if (angle >= 112.5 && angle < 157.5) return 'North-West ↖';
+    if (angle >= 157.5 || angle < -157.5) return '← West';
+    if (angle >= -157.5 && angle < -112.5) return 'South-West ↙';
+    if (angle >= -112.5 && angle < -67.5) return 'South ↓';
+    return 'South-East ↘';
   }
 
   Future<void> _openDirectionSelectionPanel() async {
+    // Derive real direction labels from the pinned road chunk angle
+    String forwardLabel = 'Forward direction';
+    String backwardLabel = 'Backward direction';
+
+    if (_roadWaiterPin != null) {
+      final pin = _roadWaiterPin!;
+      if (pin.chunkId >= 0 && pin.chunkId < _routeChunks.length) {
+        final chunk = _routeChunks[pin.chunkId];
+        forwardLabel = _directionLabel(chunk.startPoint, chunk.endPoint, true);
+        backwardLabel = _directionLabel(
+          chunk.startPoint,
+          chunk.endPoint,
+          false,
+        );
+      } else {
+        // Use generic labels for chunks with no intelligence yet
+        forwardLabel = 'Forward direction (new)';
+        backwardLabel = 'Backward direction (new)';
+      }
+    }
+
     final result = await showModalBottomSheet<RoadDirection>(
       context: context,
+      backgroundColor: Colors.transparent,
       builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'Choose jeep arrival direction',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+        return Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF1E7A76),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          padding: const EdgeInsets.fromLTRB(24, 16, 24, 36),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 44,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.35),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-                const SizedBox(height: 12),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(context, RoadDirection.backward),
-                  child: const Text('← From Left Direction (BACKWARD)'),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Which direction are you waiting for jeeps from?',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
                 ),
-                const SizedBox(height: 8),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(context, RoadDirection.forward),
-                  child: const Text('From Right Direction → (FORWARD)'),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Direction is based on the road chunk angle.',
+                style: TextStyle(color: Colors.white60, fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              // Backward = jeeps coming FROM that direction toward user
+              GestureDetector(
+                onTap: () => Navigator.pop(context, RoadDirection.backward),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 15),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    backwardLabel,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 12),
+              // Forward = jeeps coming from forward direction
+              GestureDetector(
+                onTap: () => Navigator.pop(context, RoadDirection.forward),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 15),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2E9E99),
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF2E9E99).withOpacity(0.4),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: Text(
+                    forwardLabel,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: () => Navigator.pop(context, null),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'Cancel',
+                    style: TextStyle(color: Colors.white60, fontSize: 14),
+                  ),
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -504,9 +817,23 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
     }
   }
 
-  void _placeMockUserAt(Offset worldPoint) {
+  void _placeMockUserAt(
+    Offset worldPoint, {
+    String? jeepType,
+    String? routeId,
+  }) {
     final nextId = (_users.map((user) => user.id).fold<int>(0, math.max)) + 1;
     final nearest = _findNearestRoadPoint(worldPoint);
+    final resolvedJeepType = jeepType ?? _assignJeepType(nextId);
+
+    // If a specific routeId is given, find the matching route profile path
+    List<Offset>? routePath;
+    if (routeId != null) {
+      final profile = _routeProfilesByJeepType[resolvedJeepType];
+      if (profile != null && profile.worldPath.length >= 2) {
+        routePath = profile.worldPath;
+      }
+    }
 
     if (nearest.distanceToRoad <= _SimulationScreenState._roadSnapThreshold) {
       final movingUser = User(
@@ -515,7 +842,7 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
         speed: _SimulationScreenState._defaultJeepSpeed,
         direction: const Offset(1, 0),
         visibilityRadius: 100,
-        jeepType: _assignJeepType(nextId),
+        jeepType: resolvedJeepType,
         isMockUser: true,
       );
       _users.add(movingUser);
@@ -536,13 +863,17 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
           speed: 0,
           direction: const Offset(0, 0),
           visibilityRadius: 100,
-          jeepType: _assignJeepType(nextId),
+          jeepType: resolvedJeepType,
           isMockUser: true,
         ),
       );
     }
 
     _controlUserId = nextId;
+    // routePath stored for future per-jeep route isolation feature
+    if (routePath != null && routePath.length >= 2) {
+      // Future: constrain this jeep to its own route path
+    }
   }
 
   void _placeTrafficZoneAt(Offset worldPoint) {
@@ -624,9 +955,9 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
 
   ClusterInfo? _pickClusterAtPoint(Offset point, List<ClusterInfo> clusters) {
     final thresholdWorld =
-    (_SimulationScreenState._clusterDistanceThresholdPx / _zoom)
-        .clamp(8, 120)
-        .toDouble();
+        (_SimulationScreenState._clusterDistanceThresholdPx / _zoom)
+            .clamp(8, 120)
+            .toDouble();
 
     ClusterInfo? closest;
     var minDistance = double.infinity;
@@ -639,6 +970,65 @@ extension _SimulationScreenInteractionPart on _SimulationScreenState {
     }
 
     return closest;
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  RoadChunk? _pickRoadChunkAtPoint(Offset point) {
+    RoadChunk? closest;
+    var minDistance = double.infinity;
+
+    final thresholdWorld =
+        (_SimulationScreenState._selectionTapThreshold / _zoom).clamp(
+          4.0,
+          30.0,
+        );
+
+    for (final chunk in _routeChunks) {
+      final distance = _distancePointToSegment(
+        point,
+        chunk.startPoint,
+        chunk.endPoint,
+      );
+      if (distance <= thresholdWorld && distance < minDistance) {
+        minDistance = distance;
+        closest = chunk;
+      }
+    }
+
+    return closest;
+  }
+
+  RoadChunk? _pickTopFlowBadgeChunkAtPoint(Offset point) {
+    final topFlowChunks =
+        _routeChunks.where((c) => c.flowRateJeepsPerMinute > 0).toList()..sort(
+          (a, b) =>
+              b.flowRateJeepsPerMinute.compareTo(a.flowRateJeepsPerMinute),
+        );
+    final top3 = topFlowChunks.take(3).toList();
+
+    final threshold = (_SimulationScreenState._selectionTapThreshold / _zoom)
+        .clamp(8.0, 40.0);
+
+    for (final chunk in top3) {
+      final center = Offset(
+        (chunk.startPoint.dx + chunk.endPoint.dx) / 2,
+        (chunk.startPoint.dy + chunk.endPoint.dy) / 2,
+      );
+      if (_distanceBetween(point, center) <= threshold) {
+        return chunk;
+      }
+    }
+    return null;
   }
 
   void _showClusterInfoPanel(ClusterInfo cluster) {

@@ -6,7 +6,11 @@ extension _SimulationScreenGeometryPart on _SimulationScreenState {
 
     for (int roadIndex = 0; roadIndex < _roadNetwork.length; roadIndex++) {
       final road = _roadNetwork[roadIndex];
-      for (int segmentIndex = 0; segmentIndex < road.length - 1; segmentIndex++) {
+      for (
+        int segmentIndex = 0;
+        segmentIndex < road.length - 1;
+        segmentIndex++
+      ) {
         final a = road[segmentIndex];
         final b = road[segmentIndex + 1];
         final projection = _projectPointToSegment(userPosition, a, b);
@@ -45,10 +49,7 @@ extension _SimulationScreenGeometryPart on _SimulationScreenState {
         ? 0.0
         : ((ap.dx * ab.dx) + (ap.dy * ab.dy)) / abLenSq;
     final clampedT = t.clamp(0.0, 1.0);
-    return ProjectionResult(
-      point: Offset.lerp(a, b, clampedT)!,
-      t: clampedT,
-    );
+    return ProjectionResult(point: Offset.lerp(a, b, clampedT)!, t: clampedT);
   }
 
   double _progressAlongRoad(List<Offset> road, int segmentIndex, double t) {
@@ -56,7 +57,8 @@ extension _SimulationScreenGeometryPart on _SimulationScreenState {
     for (int i = 0; i < segmentIndex; i++) {
       distance += _distanceBetween(road[i], road[i + 1]);
     }
-    distance += _distanceBetween(road[segmentIndex], road[segmentIndex + 1]) * t;
+    distance +=
+        _distanceBetween(road[segmentIndex], road[segmentIndex + 1]) * t;
     return distance;
   }
 
@@ -95,7 +97,7 @@ extension _SimulationScreenGeometryPart on _SimulationScreenState {
     );
     final scale =
         _SimulationScreenState._canvasSize /
-            ((_SimulationScreenState.worldRadius * 2) + 20);
+        ((_SimulationScreenState.worldRadius * 2) + 20);
 
     return Offset(
       (scenePoint.dx - center.dx) / scale,

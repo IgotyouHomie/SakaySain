@@ -23,6 +23,8 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
       chunks.add(
         RoadChunk(
           id: id,
+          roadLabel: 'Route',
+          indexInRoad: chunks.length + 1,
           startPoint: _pointAtProgress(current),
           endPoint: _pointAtProgress(next),
           lengthMeters: next - current,
@@ -42,11 +44,7 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
 
   bool _isPathLoop(List<Offset> path) {
     if (path.isEmpty) return false;
-    return _distanceBetween(
-          path.first,
-          path.last,
-        ) <
-        0.001;
+    return _distanceBetween(path.first, path.last) < 0.001;
   }
 
   bool _isRouteLoop() => _isPathLoop(_routePath);
@@ -175,15 +173,10 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
     for (int i = 0; i < _routePath.length - 1; i++) {
       final segStart = _routeCumulativeLengths[i];
       final segEnd = _routeCumulativeLengths[i + 1];
-      if (target <= segEnd ||
-          i == _routePath.length - 2) {
+      if (target <= segEnd || i == _routePath.length - 2) {
         final segLength = (segEnd - segStart).clamp(0.0001, double.infinity);
         final t = ((target - segStart) / segLength).clamp(0.0, 1.0);
-        return Offset.lerp(
-          _routePath[i],
-          _routePath[i + 1],
-          t,
-        )!;
+        return Offset.lerp(_routePath[i], _routePath[i + 1], t)!;
       }
     }
     return _routePath.last;
@@ -277,6 +270,11 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
   }
 
   double _realtimeSpeedForUser(User user) {
+    final pauseEndsAt = _pauseUntil[user.id];
+    if (pauseEndsAt != null && pauseEndsAt.isAfter(DateTime.now())) {
+      return 0.1;
+    }
+
     final kalman = _kalmanStateByUser[user.id];
     if (_kalmanEnabled && kalman != null) {
       final speed = kalman.speedMetersPerSecond;
@@ -664,10 +662,8 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
       ..position = ghost.position
       ..speed = ghost.avgSpeed.clamp(User.movementThreshold, 90)
       ..direction = ghost.direction == RoadDirection.forward
-          ? (_routePath.last -
-                _routePath.first)
-          : (_routePath.first -
-                _routePath.last);
+          ? (_routePath.last - _routePath.first)
+          : (_routePath.first - _routePath.last);
 
     final state = _snapUserToRoadAndInitState(user);
     state.forward = ghost.direction == RoadDirection.forward;
@@ -756,12 +752,17 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
           bucket: bucket,
           direction: ghost.direction,
         ).clamp(1.0, 180.0);
+        final ghostStopDelaySeconds = _loadingEnabled
+            ? (_stopProbability * 6.0 * _random.nextDouble())
+            : 0.0;
+        final totalNextTravelSeconds =
+            (nextTravelSeconds + ghostStopDelaySeconds).clamp(1.0, 240.0);
         ghost
           ..avgSpeed =
               _routeChunks[ghost.currentChunkId].lengthMeters /
-              nextTravelSeconds
+              totalNextTravelSeconds
           ..expectedNextChunkTime = ghost.lastChunkTransitionAt.add(
-            Duration(milliseconds: (nextTravelSeconds * 1000).round()),
+            Duration(milliseconds: (totalNextTravelSeconds * 1000).round()),
           );
       }
 
@@ -792,14 +793,8 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
         sourceUser
           ..position = ghost.position
           ..direction = ghost.direction == RoadDirection.forward
-              ? _normalizeOffset(
-                  _routePath.last -
-                      _routePath.first,
-                )
-              : _normalizeOffset(
-                  _routePath.first -
-                      _routePath.last,
-                );
+              ? _normalizeOffset(_routePath.last - _routePath.first)
+              : _normalizeOffset(_routePath.first - _routePath.last);
       }
 
       final newProgress = _ghostProgressMeters(ghost, now);
@@ -979,11 +974,7 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
       return;
     }
 
-    final target = _progressAlongRoad(
-      _routePath,
-      pin.segmentIndex,
-      pin.t,
-    );
+    final target = _progressAlongRoad(_routePath, pin.segmentIndex, pin.t);
     final crossedForward =
         oldProgressMeters < target && newProgressMeters >= target;
     final crossedBackward =
@@ -1131,10 +1122,16 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
         continue;
       }
 
+      final pauseEndsAt = _pauseUntil[user.id];
+      final pauseDelaySeconds =
+          (pauseEndsAt != null && pauseEndsAt.isAfter(DateTime.now()))
+          ? pauseEndsAt.difference(DateTime.now()).inMilliseconds / 1000
+          : 0.0;
+
       final candidate = TrackedEta(
         userId: user.id,
         jeepType: user.jeepType,
-        etaSeconds: weightedEta.finalEtaSeconds,
+        etaSeconds: weightedEta.finalEtaSeconds + pauseDelaySeconds,
         confidencePercent: _confidenceForRange(
           fromProgressMeters: userProgress,
           toProgressMeters: targetProgress,
@@ -1142,22 +1139,25 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
           direction: direction,
         ).clamp(55.0, 99.0),
         distanceMeters: distance,
-        etaRealTimeSeconds: weightedEta.realTimeSeconds,
-        etaHistoricalSeconds: weightedEta.historicalSeconds,
-        etaTrafficSeconds: weightedEta.trafficAdjustedSeconds,
+        etaRealTimeSeconds: weightedEta.realTimeSeconds + pauseDelaySeconds,
+        etaHistoricalSeconds: weightedEta.historicalSeconds + pauseDelaySeconds,
+        etaTrafficSeconds:
+            weightedEta.trafficAdjustedSeconds + pauseDelaySeconds,
         trafficFactor: weightedEta.trafficFactor,
         isGhost: false,
         predictionSource: 'Passenger Jeep',
         predictionMethod: 'Passenger Jeep ETA',
         confidenceLabel: 'HIGH',
-        predictionMinSeconds: (weightedEta.finalEtaSeconds * 0.85).clamp(
-          0.0,
-          1000000.0,
-        ),
-        predictionMaxSeconds: (weightedEta.finalEtaSeconds * 1.15).clamp(
-          0.0,
-          1000000.0,
-        ),
+        predictionMinSeconds:
+            ((weightedEta.finalEtaSeconds * 0.85) + pauseDelaySeconds).clamp(
+              0.0,
+              1000000.0,
+            ),
+        predictionMaxSeconds:
+            ((weightedEta.finalEtaSeconds * 1.15) + pauseDelaySeconds).clamp(
+              0.0,
+              1000000.0,
+            ),
         predictionAgeSeconds: 0,
       );
 
@@ -1561,20 +1561,22 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
     required RoadDirection direction,
   }) {
     final chunk = _routeChunks[chunkId];
+    final slowdown = _slowdownMultiplierForChunk(chunkId);
     final bucketMap = direction == RoadDirection.forward
         ? chunk.forwardAverageByBucket
         : chunk.backwardAverageByBucket;
     final bucketAvg = bucketMap[bucket];
     if (bucketAvg != null && bucketAvg > 0) {
-      return bucketAvg;
+      return bucketAvg * slowdown;
     }
     final directionalAvg = direction == RoadDirection.forward
         ? chunk.forwardAvgTravelTime
         : chunk.backwardAvgTravelTime;
     if (directionalAvg > 0) {
-      return directionalAvg;
+      return directionalAvg * slowdown;
     }
-    return chunk.lengthMeters / _SimulationScreenState._defaultJeepSpeed;
+    return (chunk.lengthMeters / _SimulationScreenState._defaultJeepSpeed) *
+        slowdown;
   }
 
   double _estimatedChunkTravelTimeSecondsByType({
@@ -1584,9 +1586,10 @@ extension _SimulationScreenChunkEtaPart on _SimulationScreenState {
     required String jeepType,
   }) {
     final chunk = _routeChunks[chunkId];
+    final slowdown = _slowdownMultiplierForChunk(chunkId);
     final byType = chunk.avgTravelTimeByType[jeepType];
     if (byType != null && byType > 0) {
-      return byType;
+      return byType * slowdown;
     }
     return _estimatedChunkTravelTimeSeconds(
       chunkId: chunkId,
